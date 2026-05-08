@@ -1,0 +1,8 @@
+node_modules/
+dist-electron/
+dist-renderer/
+release/
+*.log
+.vite/
+.env
+.DS_Store
