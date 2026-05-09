@@ -3,10 +3,13 @@ import {
   ChevronLeft,
   ChevronRight,
   Edit3,
+  HelpCircle,
   ImagePlus,
+  Moon,
   Plus,
   Save,
   Settings,
+  Sun,
   Trash2,
   X
 } from 'lucide-react';
@@ -70,6 +73,25 @@ export default function PopupWindow() {
       right: Math.ceil(scrollLeft + clientWidth) < scrollWidth - 1
     });
   }, []);
+
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+
+    // If there is any active horizontal scroll wheel or trackpad delta,
+    // let the browser handle it completely natively and smoothly.
+    if (Math.abs(e.deltaX) > 0) {
+      return;
+    }
+
+    // Redirect vertical scrollwheel actions to smooth horizontal scrolling.
+    if (e.deltaY !== 0) {
+      e.preventDefault();
+      container.scrollTo({
+        left: container.scrollLeft + e.deltaY,
+        behavior: 'smooth'
+      });
+    }
+  };
 
   useEffect(() => {
     checkStripScroll();
@@ -454,7 +476,7 @@ export default function PopupWindow() {
   } as CSSProperties;
 
   return (
-    <div className="popup-shell" style={chromeStyle}>
+    <div className={`popup-shell ${settings.darkMode ? 'dark-theme' : 'light-theme'}`} style={chromeStyle}>
       {isResizingMode && (
         <div className="resize-preview-mode no-drag">
           <div className="resize-message">
@@ -475,7 +497,13 @@ export default function PopupWindow() {
       )}
       <header className="popup-toolbar">
         <div className={`provider-strip-wrapper ${scrollState.left ? 'mask-left' : ''} ${scrollState.right ? 'mask-right' : ''}`}>
-          <div className="provider-strip" aria-label="Providers" ref={providerStripRef} onScroll={checkStripScroll}>
+          <div
+            className="provider-strip"
+            aria-label="Providers"
+            ref={providerStripRef}
+            onScroll={checkStripScroll}
+            onWheel={handleWheel}
+          >
             {settings.providers.map((provider) => (
               <button
                 key={provider.id}
@@ -566,7 +594,7 @@ export default function PopupWindow() {
                     </button>
                   </div>
                 </div>
-                <CompactSliderRow
+                 <CompactSliderRow
                   label="Transparency"
                   value={Math.round(settings.popup.opacity * 100)}
                   min={60}
@@ -574,6 +602,28 @@ export default function PopupWindow() {
                   suffix="%"
                   onChange={(opacity) => patchPopup({ opacity: opacity / 100 })}
                 />
+                 <div className="theme-segmented-row">
+                  <span>Theme</span>
+                  <div className="segmented-control">
+                    <div className={`segmented-slider ${settings.darkMode ? 'dark-active' : 'light-active'}`} />
+                    <button
+                      type="button"
+                      className={`segmented-btn ${!settings.darkMode ? 'active' : ''}`}
+                      onClick={() => persist({ darkMode: false })}
+                    >
+                      <Sun size={14} className="segmented-icon" />
+                      <span>Light</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`segmented-btn ${settings.darkMode ? 'active' : ''}`}
+                      onClick={() => persist({ darkMode: true })}
+                    >
+                      <Moon size={14} className="segmented-icon" />
+                      <span>Dark</span>
+                    </button>
+                  </div>
+                </div>
                 <CompactToggleRow
                   label="Always on top"
                   checked={settings.popup.alwaysOnTop}
@@ -584,8 +634,8 @@ export default function PopupWindow() {
                   checked={settings.popup.rememberPosition}
                   onChange={(rememberPosition) => patchPopup({ rememberPosition })}
                 />
-                <CompactToggleRow
-                  label="Hide on blur"
+                 <CompactToggleRow
+                  label="Hide on defocus"
                   checked={settings.popup.hideOnBlur}
                   onChange={(hideOnBlur) => patchPopup({ hideOnBlur })}
                 />
@@ -599,16 +649,12 @@ export default function PopupWindow() {
                   checked={settings.launchAtStartup}
                   onChange={(launchAtStartup) => persist({ launchAtStartup })}
                 />
-                <div style={{ marginTop: '8px', padding: '12px', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '12px', border: '1px solid rgba(255, 255, 255, 0.06)' }}>
-                  <CompactToggleRow
-                    label="Privacy Capture Protection"
-                    checked={settings.privacy?.captureProtection ?? false}
-                    onChange={(captureProtection) => persist({ privacy: { captureProtection } })}
-                  />
-                  <p style={{ margin: '8px 0 0', fontSize: '12px', color: '#8c9ba3', lineHeight: '1.4' }}>
-                    Hides FloatAI from screenshots and screen sharing where supported <strong style={{color: '#52d273'}}>(FULLY UNDETECTABLE)</strong>. Works best on Windows 10 2004+ and Windows 11. Support may vary by app and OS.
-                  </p>
-                </div>
+                 <CompactToggleRow
+                  label="Privacy Capture Protection"
+                  checked={settings.privacy?.captureProtection ?? false}
+                  onChange={(captureProtection) => persist({ privacy: { captureProtection } })}
+                  tooltip="Hides FloatAI from screenshots and screen sharing where supported (FULLY UNDETECTABLE). Works best on Windows 10 2004+ and Windows 11. Support may vary by app and OS."
+                />
               </div>
             )}
 
@@ -864,15 +910,25 @@ function CompactSliderRow({
 function CompactToggleRow({
   checked,
   label,
-  onChange
+  onChange,
+  tooltip
 }: {
   checked: boolean;
   label: string;
   onChange: (checked: boolean) => void;
+  tooltip?: string;
 }) {
   return (
     <div className="compact-toggle-row">
-      <span>{label}</span>
+      <span className="compact-toggle-label-wrapper">
+        <span>{label}</span>
+        {tooltip && (
+          <span className="tooltip-container">
+            <HelpCircle size={14} className="help-icon" />
+            <span className="tooltip-text">{tooltip}</span>
+          </span>
+        )}
+      </span>
       <button
         type="button"
         className={checked ? 'toggle active' : 'toggle'}

@@ -43,10 +43,12 @@
       "dist-electron/**/*",
       "dist-renderer/**/*",
       "provider-icons/**/*",
+      "icon_256.png",
       "package.json"
     ],
     "asar": true,
     "win": {
+      "icon": "icon_256.png",
       "target": [
         "nsis",
         "portable"

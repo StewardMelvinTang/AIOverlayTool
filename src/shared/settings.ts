@@ -37,6 +37,7 @@ export type FloatAISettings = {
   clipboard: ClipboardSettings;
   privacy: PrivacySettings;
   enableZoomShortcuts: boolean;
+  darkMode: boolean;
 };
 
 export type DeepPartial<T> = {
@@ -101,7 +102,8 @@ export const defaultSettings: FloatAISettings = {
   privacy: {
     captureProtection: false
   },
-  enableZoomShortcuts: false
+  enableZoomShortcuts: false,
+  darkMode: true
 };
 
 export function isBuiltInProvider(providerId: string): boolean {
@@ -203,7 +205,11 @@ export function normalizeSettings(value: unknown): FloatAISettings {
     enableZoomShortcuts:
       typeof input.enableZoomShortcuts === 'boolean'
         ? input.enableZoomShortcuts
-        : defaultSettings.enableZoomShortcuts
+        : defaultSettings.enableZoomShortcuts,
+    darkMode:
+      typeof input.darkMode === 'boolean'
+        ? input.darkMode
+        : defaultSettings.darkMode
   };
 }
 

@@ -5,6 +5,7 @@ import {
   globalShortcut,
   ipcMain,
   Menu,
+  nativeTheme,
   nativeImage,
   net,
   screen,
@@ -57,6 +58,14 @@ app.setName('FloatAI Launcher');
 
 function getPreloadPath(): string {
   return path.join(__dirname, 'preload.js');
+}
+
+function getAppIconPath(): string {
+  const customPath = path.join(app.getAppPath(), 'icon_256.png');
+  if (existsSync(customPath)) {
+    return customPath;
+  }
+  return path.join(__dirname, '../icon_256.png');
 }
 
 function getRendererUrl(windowName: 'popup' | 'settings'): string {
@@ -164,9 +173,13 @@ function createPopupWindow(): BrowserWindow {
     return popupWindow;
   }
 
+  const iconPath = getAppIconPath();
+  const iconImage = existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
+
   popupWindow = new BrowserWindow({
     ...calculatePopupBounds(),
     title: 'FloatAI Launcher',
+    icon: iconImage,
     show: false,
     frame: false,
     resizable: false,
@@ -347,6 +360,8 @@ function updateSettings(patch: DeepPartial<FloatAISettings>): FloatAISettings {
   syncLaunchAtStartup();
   syncTray();
 
+  nativeTheme.themeSource = settings.darkMode ? 'dark' : 'light';
+
   if (settings.globalHotkey !== previousHotkey) {
     registerGlobalShortcut();
   }
@@ -476,6 +491,12 @@ function syncLaunchAtStartup(): void {
 }
 
 function createTrayImage() {
+  const iconPath = getAppIconPath();
+  if (existsSync(iconPath)) {
+    const image = nativeImage.createFromPath(iconPath);
+    return image.resize({ width: 16, height: 16 });
+  }
+
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
       <rect width="32" height="32" rx="8" fill="#101214"/>
@@ -689,6 +710,9 @@ app.whenReady().then(() => {
   
   settings = deepMergeSettings(defaultSettings, store.store as DeepPartial<FloatAISettings>);
   store.set(settings);
+  
+  nativeTheme.themeSource = settings.darkMode ? 'dark' : 'light';
+
   syncLaunchAtStartup();
   syncTray();
   registerGlobalShortcut();
