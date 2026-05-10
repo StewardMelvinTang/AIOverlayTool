@@ -1,8 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { FloatAIBridge, PopupPosition, PopupSize, WebviewNavigationDirection } from './shared/bridge';
+import type {
+  FloatAIBridge,
+  PopupPosition,
+  PopupSize,
+  WebviewNavigationDirection
+} from './shared/bridge';
 import type { DeepPartial, FloatAISettings, Provider } from './shared/settings';
 
 const bridge: FloatAIBridge = {
+  platform: process.platform,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<FloatAISettings>,
   updateSettings: (patch: DeepPartial<FloatAISettings>) =>
     ipcRenderer.invoke('settings:update', patch) as Promise<FloatAISettings>,

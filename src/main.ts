@@ -27,17 +27,21 @@ import {
 import type { ProviderIconPickResult, PopupPosition, PopupSize } from './shared/bridge';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const isMac = process.platform === 'darwin';
+const macDefaultHotkey = 'Option+Space';
+const macTrayTitle = 'AI';
 const store = new Store<FloatAISettings>({
   name: 'float-ai-launcher',
   defaults: defaultSettings
 });
 
-let settings = deepMergeSettings(defaultSettings, store.store as DeepPartial<FloatAISettings>);
+let settings = applyPlatformSettings(deepMergeSettings(defaultSettings, store.store as DeepPartial<FloatAISettings>));
 let popupWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let registeredHotkey: string | null = null;
 let currentProviderId = settings.defaultProviderId;
 let savePositionTimer: NodeJS.Timeout | undefined;
+let isPopupRendererReady = false;
 let isQuitting = false;
 let isHiding = false;
 
@@ -55,6 +59,24 @@ if (!gotLock) {
 }
 
 app.setName('FloatAI Launcher');
+
+function applyPlatformSettings(nextSettings: FloatAISettings): FloatAISettings {
+  if (!isMac) {
+    return nextSettings;
+  }
+
+  const patch: DeepPartial<FloatAISettings> = {};
+
+  if (nextSettings.globalHotkey === defaultSettings.globalHotkey) {
+    patch.globalHotkey = macDefaultHotkey;
+  }
+
+  if (!nextSettings.showTrayIcon) {
+    patch.showTrayIcon = true;
+  }
+
+  return Object.keys(patch).length > 0 ? deepMergeSettings(nextSettings, patch) : nextSettings;
+}
 
 function getPreloadPath(): string {
   return path.join(__dirname, 'preload.js');
@@ -185,6 +207,7 @@ function createPopupWindow(): BrowserWindow {
     resizable: false,
     maximizable: false,
     minimizable: false,
+    fullscreenable: false,
     alwaysOnTop: settings.popup.alwaysOnTop,
     skipTaskbar: true,
     transparent: true,
@@ -210,6 +233,18 @@ function createPopupWindow(): BrowserWindow {
     queuePopupPositionSave();
   });
 
+  const minimizableWindow = popupWindow as unknown as {
+    on: (event: 'minimize', listener: (event: { preventDefault: () => void }) => void) => void;
+  };
+
+  minimizableWindow.on('minimize', (event) => {
+    event.preventDefault();
+  });
+
+  popupWindow.on('maximize', () => {
+    popupWindow?.unmaximize();
+  });
+
   popupWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault();
@@ -219,6 +254,13 @@ function createPopupWindow(): BrowserWindow {
 
   popupWindow.on('closed', () => {
     popupWindow = null;
+    isPopupRendererReady = false;
+  });
+
+  popupWindow.webContents.once('did-finish-load', () => {
+    isPopupRendererReady = true;
+    broadcastSettings();
+    broadcastProvider();
   });
 
   popupWindow.on('app-command', (_event, command) => {
@@ -236,8 +278,33 @@ function createPopupWindow(): BrowserWindow {
     return { action: 'deny' };
   });
 
+  popupWindow.webContents.on('context-menu', (event) => {
+    event.preventDefault();
+  });
+
   loadRenderer(popupWindow, 'popup');
   return popupWindow;
+}
+
+function sendToPopup(channel: string, ...args: unknown[]): void {
+  const window = popupWindow;
+
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  const send = () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(channel, ...args);
+    }
+  };
+
+  if (isPopupRendererReady) {
+    send();
+    return;
+  }
+
+  window.webContents.once('did-finish-load', send);
 }
 
 function showPopup(options: PopupBoundsOptions = {}): void {
@@ -247,10 +314,11 @@ function showPopup(options: PopupBoundsOptions = {}): void {
   isHiding = false;
   window.show();
   window.focus();
+  syncTray();
 
-  window.webContents.send('popup:animate', 'in');
-  window.webContents.send('settings:changed', settings);
-  window.webContents.send('provider:changed', getSelectedProvider());
+  sendToPopup('popup:animate', 'in');
+  sendToPopup('settings:changed', settings);
+  sendToPopup('provider:changed', getSelectedProvider());
 }
 
 function hidePopup(): void {
@@ -260,12 +328,13 @@ function hidePopup(): void {
 
   isHiding = true;
   savePopupPosition();
-  popupWindow.webContents.send('popup:animate', 'out');
+  sendToPopup('popup:animate', 'out');
   
   setTimeout(() => {
     if (popupWindow && !popupWindow.isDestroyed() && isHiding) {
       popupWindow.hide();
       isHiding = false;
+      syncTray();
     }
   }, 120);
 }
@@ -286,10 +355,11 @@ function openIntegratedSettings(): void {
   isHiding = false;
   window.show();
   window.focus();
+  syncTray();
 
-  window.webContents.send('popup:animate', 'in');
-  window.webContents.send('settings:changed', settings);
-  window.webContents.send('popup:openSettings');
+  sendToPopup('popup:animate', 'in');
+  sendToPopup('settings:changed', settings);
+  sendToPopup('popup:openSettings');
 }
 
 function applyPopupSettings(options: PopupBoundsOptions = {}, skipOpacity = false): void {
@@ -345,7 +415,7 @@ function savePopupPosition(position?: PopupPosition): FloatAISettings {
 
 function updateSettings(patch: DeepPartial<FloatAISettings>): FloatAISettings {
   const previousHotkey = settings.globalHotkey;
-  settings = deepMergeSettings(settings, patch);
+  settings = applyPlatformSettings(deepMergeSettings(settings, patch));
 
   if (!settings.providers.some((provider) => provider.id === currentProviderId)) {
     currentProviderId = settings.defaultProviderId;
@@ -460,11 +530,11 @@ function resizePopup(size: PopupSize): FloatAISettings {
 }
 
 function broadcastSettings(): void {
-  popupWindow?.webContents.send('settings:changed', settings);
+  sendToPopup('settings:changed', settings);
 }
 
 function broadcastProvider(): void {
-  popupWindow?.webContents.send('provider:changed', getSelectedProvider());
+  sendToPopup('provider:changed', getSelectedProvider());
 }
 
 function registerGlobalShortcut(): void {
@@ -473,24 +543,57 @@ function registerGlobalShortcut(): void {
     registeredHotkey = null;
   }
 
-  const ok = globalShortcut.register(settings.globalHotkey, () => togglePopup({ anchorToCursor: true }));
+  const preferredHotkeys = [
+    settings.globalHotkey,
+    ...(isMac ? [macDefaultHotkey, 'CommandOrControl+Shift+Space'] : [])
+  ].filter((hotkey, index, hotkeys) => hotkey && hotkeys.indexOf(hotkey) === index);
 
-  if (ok) {
-    registeredHotkey = settings.globalHotkey;
-    return;
+  for (const hotkey of preferredHotkeys) {
+    const ok = globalShortcut.register(hotkey, () => togglePopup({ anchorToCursor: true }));
+
+    if (ok) {
+      registeredHotkey = hotkey;
+      return;
+    }
   }
 
-  console.warn(`Could not register global shortcut: ${settings.globalHotkey}`);
+  console.warn(`Could not register global shortcut: ${preferredHotkeys.join(', ')}`);
 }
 
 function syncLaunchAtStartup(): void {
-  app.setLoginItemSettings({
-    openAtLogin: settings.launchAtStartup,
-    path: process.execPath
-  });
+  if (isMac && isDev) {
+    return;
+  }
+
+  try {
+    app.setLoginItemSettings({
+      openAtLogin: settings.launchAtStartup,
+      path: process.execPath,
+      ...(isMac ? { openAsHidden: true } : {})
+    });
+  } catch (error) {
+    console.warn('Could not update launch-at-login settings.', error);
+  }
 }
 
-function createTrayImage() {
+function createMacTrayImage(): Electron.NativeImage {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
+      <path d="M8 27V9h20v5H14v4h12v4H14v5H8z" fill="#000"/>
+      <circle cx="27" cy="27" r="5" fill="#000"/>
+    </svg>
+  `;
+
+  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
+  image.setTemplateImage(true);
+  return image.resize({ width: 18, height: 18 });
+}
+
+function createTrayImage(): Electron.NativeImage {
+  if (isMac) {
+    return createMacTrayImage();
+  }
+
   const iconPath = getAppIconPath();
   if (existsSync(iconPath)) {
     const image = nativeImage.createFromPath(iconPath);
@@ -510,8 +613,50 @@ function createTrayImage() {
   return image;
 }
 
+function createTrayMenu(): Menu {
+  const canHide = Boolean(popupWindow?.isVisible() && !isHiding);
+
+  return Menu.buildFromTemplate([
+    {
+      label: canHide ? 'Hide Popup' : 'Open Popup',
+      click: () => togglePopup()
+    },
+    {
+      label: 'Open Settings',
+      click: openIntegratedSettings
+    },
+    { type: 'separator' },
+    {
+      label: 'Refresh Pages',
+      click: () => reloadAllWebviews()
+    },
+    { type: 'separator' },
+    {
+      label: isMac ? 'Quit FloatAI Completely' : 'Quit',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+}
+
+function updateTrayAppearance(): void {
+  if (!tray) {
+    return;
+  }
+
+  tray.setImage(createTrayImage());
+  tray.setToolTip('FloatAI Launcher');
+
+  if (isMac) {
+    tray.setTitle(macTrayTitle);
+    tray.setIgnoreDoubleClickEvents(true);
+  }
+}
+
 function syncTray(): void {
-  if (!settings.showTrayIcon) {
+  if (!settings.showTrayIcon && !isMac) {
     tray?.destroy();
     tray = null;
     return;
@@ -519,39 +664,78 @@ function syncTray(): void {
 
   if (!tray) {
     tray = new Tray(createTrayImage());
-    tray.setToolTip('FloatAI Launcher');
     tray.on('click', () => togglePopup());
   }
 
-  tray.setContextMenu(
+  updateTrayAppearance();
+  tray.setContextMenu(createTrayMenu());
+}
+
+function setupApplicationMenu(): void {
+  if (!isMac) {
+    return;
+  }
+
+  Menu.setApplicationMenu(
     Menu.buildFromTemplate([
       {
-        label: 'Open Popup',
-        click: () => showPopup()
+        label: app.name,
+        submenu: [
+          { role: 'about' },
+          { type: 'separator' },
+          { role: 'hide' },
+          { role: 'hideOthers' },
+          { role: 'unhide' },
+          { type: 'separator' },
+          {
+            label: 'Quit FloatAI Completely',
+            accelerator: 'Command+Q',
+            click: () => {
+              isQuitting = true;
+              app.quit();
+            }
+          }
+        ]
       },
       {
-        label: 'Open Settings',
-        click: openIntegratedSettings
+        label: 'FloatAI',
+        submenu: [
+          {
+            label: 'Open Popup',
+            accelerator: macDefaultHotkey,
+            click: () => showPopup({ anchorToCursor: true })
+          },
+          {
+            label: 'Open Settings',
+            accelerator: 'Command+,',
+            click: openIntegratedSettings
+          },
+          { type: 'separator' },
+          {
+            label: 'Refresh Pages',
+            accelerator: 'Command+R',
+            click: reloadAllWebviews
+          }
+        ]
       },
-      { type: 'separator' },
       {
-        label: 'Refresh Pages',
-        click: () => reloadAllWebviews()
-      },
-      { type: 'separator' },
-      {
-        label: 'Quit',
-        click: () => {
-          isQuitting = true;
-          app.quit();
-        }
+        label: 'Edit',
+        submenu: [
+          { role: 'undo' },
+          { role: 'redo' },
+          { type: 'separator' },
+          { role: 'cut' },
+          { role: 'copy' },
+          { role: 'paste' },
+          { role: 'selectAll' }
+        ]
       }
     ])
   );
 }
 
 function reloadAllWebviews(): void {
-  popupWindow?.webContents.send('webview:reloadAll');
+  sendToPopup('webview:reloadAll');
 }
 
 function waitForNetworkAndReload(): void {
@@ -708,11 +892,16 @@ function clearGuestSelection(contents: Electron.WebContents): void {
 app.whenReady().then(() => {
   app.userAgentFallback = app.userAgentFallback.replace(/Electron\/[\d.]+ /, '');
   
-  settings = deepMergeSettings(defaultSettings, store.store as DeepPartial<FloatAISettings>);
+  if (isMac) {
+    app.dock?.hide();
+  }
+
+  settings = applyPlatformSettings(deepMergeSettings(defaultSettings, store.store as DeepPartial<FloatAISettings>));
   store.set(settings);
   
   nativeTheme.themeSource = settings.darkMode ? 'dark' : 'light';
 
+  setupApplicationMenu();
   syncLaunchAtStartup();
   syncTray();
   registerGlobalShortcut();
@@ -732,6 +921,10 @@ app.on('before-quit', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+});
+
+app.on('activate', () => {
+  showPopup();
 });
 
 app.on('window-all-closed', () => {

@@ -265,6 +265,5 @@ function normalizeHotkey(value: unknown): string {
     return defaultSettings.globalHotkey;
   }
 
-  const hotkey = value.trim();
-  return hotkey === 'CommandOrControl+Space' ? defaultSettings.globalHotkey : hotkey;
+  return value.trim();
 }

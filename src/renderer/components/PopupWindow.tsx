@@ -61,9 +61,11 @@ export default function PopupWindow() {
   const [isResizingMode, setIsResizingMode] = useState(false);
   const [providerToDelete, setProviderToDelete] = useState<string | null>(null);
   const webviewRefs = useRef<Record<string, WebviewElement | null>>({});
+  const webviewCleanupRefs = useRef<Record<string, (() => void) | undefined>>({});
   const providerStripRef = useRef<HTMLDivElement>(null);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
-  const [isVisible, setIsVisible] = useState(false);
+  const [isVisible, setIsVisible] = useState(true);
+  const isMac = window.floatAI.platform === 'darwin';
 
   const checkStripScroll = useCallback(() => {
     if (!providerStripRef.current) return;
@@ -168,6 +170,10 @@ export default function PopupWindow() {
       removeAnimateListener();
       removeReloadListener();
       window.removeEventListener('mouseup', handleMouseNavigation);
+      for (const cleanup of Object.values(webviewCleanupRefs.current)) {
+        cleanup?.();
+      }
+      webviewCleanupRefs.current = {};
     };
   }, []);
 
@@ -403,6 +409,8 @@ export default function PopupWindow() {
       return;
     }
 
+    webviewCleanupRefs.current[providerId]?.();
+    webviewCleanupRefs.current[providerId] = undefined;
     webviewRefs.current[providerId] = element;
 
     if (!element) {
@@ -416,9 +424,18 @@ export default function PopupWindow() {
       }));
     };
 
-    element.addEventListener('did-start-loading', () => setProviderLoading(true));
-    element.addEventListener('did-stop-loading', () => setProviderLoading(false));
-    element.addEventListener('did-fail-load', () => setProviderLoading(false));
+    const handleStartLoading = () => setProviderLoading(true);
+    const handleStopLoading = () => setProviderLoading(false);
+
+    element.addEventListener('did-start-loading', handleStartLoading);
+    element.addEventListener('did-stop-loading', handleStopLoading);
+    element.addEventListener('did-fail-load', handleStopLoading);
+
+    webviewCleanupRefs.current[providerId] = () => {
+      element.removeEventListener('did-start-loading', handleStartLoading);
+      element.removeEventListener('did-stop-loading', handleStopLoading);
+      element.removeEventListener('did-fail-load', handleStopLoading);
+    };
   }
 
   const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -455,10 +472,30 @@ export default function PopupWindow() {
     target.addEventListener('pointerup', onPointerUp);
   };
 
+  const suppressMacToolbarEvent = (event: React.MouseEvent<HTMLElement>) => {
+    if (!isMac) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  const suppressMacToolbarMouseDown = (event: React.MouseEvent<HTMLElement>) => {
+    if (isMac && (event.button !== 0 || event.detail > 1)) {
+      suppressMacToolbarEvent(event);
+    }
+  };
+
   if (!settings || !selectedProvider) {
     return (
-      <div className="popup-shell">
-        <div className="popup-toolbar">
+      <div className={`popup-shell ${isMac ? 'mac-platform' : ''}`}>
+        <div
+          className="popup-toolbar"
+          onContextMenu={suppressMacToolbarEvent}
+          onDoubleClick={suppressMacToolbarEvent}
+          onMouseDown={suppressMacToolbarMouseDown}
+        >
           <div className="provider-strip" />
         </div>
         <div className="loading-surface">Loading</div>
@@ -476,7 +513,10 @@ export default function PopupWindow() {
   } as CSSProperties;
 
   return (
-    <div className={`popup-shell ${settings.darkMode ? 'dark-theme' : 'light-theme'}`} style={chromeStyle}>
+    <div
+      className={`popup-shell ${settings.darkMode ? 'dark-theme' : 'light-theme'} ${isMac ? 'mac-platform' : ''}`}
+      style={chromeStyle}
+    >
       {isResizingMode && (
         <div className="resize-preview-mode no-drag">
           <div className="resize-message">
@@ -495,7 +535,12 @@ export default function PopupWindow() {
           </div>
         </div>
       )}
-      <header className="popup-toolbar">
+      <header
+        className="popup-toolbar"
+        onContextMenu={suppressMacToolbarEvent}
+        onDoubleClick={suppressMacToolbarEvent}
+        onMouseDown={suppressMacToolbarMouseDown}
+      >
         <div className={`provider-strip-wrapper ${scrollState.left ? 'mask-left' : ''} ${scrollState.right ? 'mask-right' : ''}`}>
           <div
             className="provider-strip"
@@ -640,7 +685,7 @@ export default function PopupWindow() {
                   onChange={(hideOnBlur) => patchPopup({ hideOnBlur })}
                 />
                 <CompactToggleRow
-                  label="Tray icon"
+                  label={isMac ? 'Menu bar icon' : 'Tray icon'}
                   checked={settings.showTrayIcon}
                   onChange={(showTrayIcon) => persist({ showTrayIcon })}
                 />
@@ -704,7 +749,7 @@ export default function PopupWindow() {
                       className="input"
                       value={hotkeyDraft}
                       onChange={(event) => setHotkeyDraft(event.target.value)}
-                      placeholder="F20"
+                      placeholder={isMac ? 'Option+Space' : 'F20'}
                     />
                     <button
                       className="primary-button compact"

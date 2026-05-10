@@ -1,7 +1,7 @@
 {
   "name": "floatai-launcher",
   "version": "0.1.0",
-  "description": "A universal floating AI popup launcher for Windows.",
+  "description": "A universal floating AI popup launcher for macOS and Windows.",
   "main": "dist-electron/main.js",
   "author": "FloatAI Launcher",
   "license": "MIT",
@@ -12,7 +12,11 @@
     "typecheck": "tsc --noEmit -p tsconfig.electron.json && tsc --noEmit -p tsconfig.renderer.json",
     "build": "npm run typecheck && npm run build:main && npm run build:renderer",
     "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder --win"
+    "pack:mac": "npm run build && electron-builder --mac --dir",
+    "pack:win": "npm run build && electron-builder --win --dir",
+    "dist": "npm run build && electron-builder",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:win": "npm run build && electron-builder --win"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.4",
@@ -37,7 +41,8 @@
     "appId": "com.floatai.launcher",
     "productName": "FloatAI Launcher",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist-electron/**/*",
@@ -53,6 +58,17 @@
         "nsis",
         "portable"
       ]
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.productivity",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,

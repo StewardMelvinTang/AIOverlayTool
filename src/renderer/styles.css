@@ -157,6 +157,10 @@ button {
   -webkit-app-region: drag;
 }
 
+.mac-platform .popup-toolbar {
+  cursor: default;
+}
+
 .no-drag,
 .no-drag * {
   -webkit-app-region: no-drag;

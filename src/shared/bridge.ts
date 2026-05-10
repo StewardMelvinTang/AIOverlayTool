@@ -18,6 +18,7 @@ export type ProviderIconPickResult = {
 };
 
 export type FloatAIBridge = {
+  platform: string;
   getSettings: () => Promise<FloatAISettings>;
   updateSettings: (patch: DeepPartial<FloatAISettings>) => Promise<FloatAISettings>;
   openSettings: () => Promise<void>;
