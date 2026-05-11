@@ -10,6 +10,8 @@ FloatAI Launcher is a macOS and Windows Electron app that opens a floating, alwa
 - Bundled provider PNG icons plus a picker that copies custom PNG icons into app data.
 - Popup sizing controlled from settings.
 - Optional chrome transparency, always-on-top, remember position, hide-on-blur, launch-at-startup, and tray/menu bar settings.
+- Performance settings for Memory Saver and macOS hardware acceleration.
+- Memory Saver unloads inactive AI pages and restores their last visited URL when reopened.
 - Mouse back and forward buttons navigate the active provider page.
 - Visible macOS `AI` menu bar item and Windows system tray menu with Open Popup, Open Settings, Refresh Pages, and Quit.
 - AI pages load in Electron `webview`, not an iframe.
@@ -100,6 +102,11 @@ Settings are saved through `electron-store` under the app name `float-ai-launche
   "clipboard": {
     "copySelectedTextBeforeOpen": false,
     "autoPaste": false
+  },
+  "performance": {
+    "hardwareAcceleration": true,
+    "memorySaver": true,
+    "memorySaverUnloadMinutes": 2
   }
 }
 ```

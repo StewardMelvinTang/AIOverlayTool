@@ -44,13 +44,16 @@ let savePositionTimer: NodeJS.Timeout | undefined;
 let isPopupRendererReady = false;
 let isQuitting = false;
 let isHiding = false;
+let isShortcutCaptureActive = false;
 
 
 type PopupBoundsOptions = {
   anchorToCursor?: boolean;
 };
 
-app.disableHardwareAcceleration();
+if (!settings.performance.hardwareAcceleration) {
+  app.disableHardwareAcceleration();
+}
 
 const gotLock = app.requestSingleInstanceLock();
 
@@ -224,7 +227,7 @@ function createPopupWindow(): BrowserWindow {
   popupWindow.setAlwaysOnTop(settings.popup.alwaysOnTop, 'floating');
 
   popupWindow.on('blur', () => {
-    if (settings.popup.hideOnBlur) {
+    if (!isShortcutCaptureActive && settings.popup.hideOnBlur) {
       hidePopup();
     }
   });
@@ -253,6 +256,7 @@ function createPopupWindow(): BrowserWindow {
   });
 
   popupWindow.on('closed', () => {
+    setShortcutCaptureActive(false);
     popupWindow = null;
     isPopupRendererReady = false;
   });
@@ -340,6 +344,10 @@ function hidePopup(): void {
 }
 
 function togglePopup(options: PopupBoundsOptions = {}): void {
+  if (isShortcutCaptureActive) {
+    return;
+  }
+
   if (popupWindow?.isVisible() && !isHiding) {
     hidePopup();
     return;
@@ -414,6 +422,7 @@ function savePopupPosition(position?: PopupPosition): FloatAISettings {
 }
 
 function updateSettings(patch: DeepPartial<FloatAISettings>): FloatAISettings {
+  const previousSettings = settings;
   const previousHotkey = settings.globalHotkey;
   settings = applyPlatformSettings(deepMergeSettings(settings, patch));
 
@@ -426,15 +435,21 @@ function updateSettings(patch: DeepPartial<FloatAISettings>): FloatAISettings {
     broadcastProvider();
   }
 
+  if (settings.globalHotkey !== previousHotkey) {
+    const registered = registerGlobalShortcut({ allowFallback: false });
+
+    if (!registered) {
+      settings = previousSettings;
+      registerGlobalShortcut({ allowFallback: true });
+      throw new Error(`Could not register global shortcut "${patch.globalHotkey}". It may be invalid or already in use.`);
+    }
+  }
+
   store.set(settings);
   syncLaunchAtStartup();
   syncTray();
 
   nativeTheme.themeSource = settings.darkMode ? 'dark' : 'light';
-
-  if (settings.globalHotkey !== previousHotkey) {
-    registerGlobalShortcut();
-  }
 
   applyPopupSettings();
   broadcastSettings();
@@ -537,7 +552,7 @@ function broadcastProvider(): void {
   sendToPopup('provider:changed', getSelectedProvider());
 }
 
-function registerGlobalShortcut(): void {
+function registerGlobalShortcut(options: { allowFallback?: boolean } = {}): string | null {
   if (registeredHotkey) {
     globalShortcut.unregister(registeredHotkey);
     registeredHotkey = null;
@@ -545,19 +560,48 @@ function registerGlobalShortcut(): void {
 
   const preferredHotkeys = [
     settings.globalHotkey,
-    ...(isMac ? [macDefaultHotkey, 'CommandOrControl+Shift+Space'] : [])
+    ...(isMac && options.allowFallback ? [macDefaultHotkey, 'CommandOrControl+Shift+Space'] : [])
   ].filter((hotkey, index, hotkeys) => hotkey && hotkeys.indexOf(hotkey) === index);
 
   for (const hotkey of preferredHotkeys) {
-    const ok = globalShortcut.register(hotkey, () => togglePopup({ anchorToCursor: true }));
+    let ok = false;
+
+    try {
+      ok = globalShortcut.register(hotkey, () => {
+        if (!isShortcutCaptureActive) {
+          togglePopup({ anchorToCursor: true });
+        }
+      });
+    } catch {
+      ok = false;
+    }
 
     if (ok) {
       registeredHotkey = hotkey;
-      return;
+      return hotkey;
     }
   }
 
   console.warn(`Could not register global shortcut: ${preferredHotkeys.join(', ')}`);
+  return null;
+}
+
+function setShortcutCaptureActive(active: boolean): void {
+  if (isShortcutCaptureActive === active) {
+    return;
+  }
+
+  isShortcutCaptureActive = active;
+
+  if (active) {
+    if (registeredHotkey) {
+      globalShortcut.unregister(registeredHotkey);
+      registeredHotkey = null;
+    }
+    return;
+  }
+
+  registerGlobalShortcut({ allowFallback: true });
 }
 
 function syncLaunchAtStartup(): void {
@@ -766,6 +810,7 @@ function registerIpc(): void {
   ipcMain.handle('window:openSettings', () => openIntegratedSettings());
   ipcMain.handle('popup:toggle', () => togglePopup());
   ipcMain.handle('popup:hide', () => hidePopup());
+  ipcMain.handle('shortcut:captureActive', (_event, active: boolean) => setShortcutCaptureActive(Boolean(active)));
   ipcMain.handle('provider:switch', (_event, providerId: string) => switchProvider(providerId));
   ipcMain.handle('provider:pickIcon', () => pickProviderIcon());
   ipcMain.handle('provider:resolveIcon', (_event, icon: string) => resolveProviderIcon(icon));
@@ -904,7 +949,7 @@ app.whenReady().then(() => {
   setupApplicationMenu();
   syncLaunchAtStartup();
   syncTray();
-  registerGlobalShortcut();
+  registerGlobalShortcut({ allowFallback: true });
 
   // When the app launches at startup the network may not be ready yet,
   // causing webviews to show blank pages.  Poll for connectivity and

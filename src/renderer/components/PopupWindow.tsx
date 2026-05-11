@@ -5,6 +5,7 @@ import {
   Edit3,
   HelpCircle,
   ImagePlus,
+  Keyboard,
   Moon,
   Plus,
   Save,
@@ -24,7 +25,7 @@ import {
 } from '../../shared/settings';
 import type { WebviewNavigationDirection } from '../../shared/bridge';
 
-type SettingsTab = 'window' | 'providers' | 'shortcut';
+type SettingsTab = 'window' | 'providers' | 'shortcut' | 'performance';
 
 type ProviderDraft = {
   name: string;
@@ -35,8 +36,10 @@ type ProviderDraft = {
 type WebviewElement = HTMLElement & {
   canGoBack: () => boolean;
   canGoForward: () => boolean;
+  getURL: () => string;
   goBack: () => void;
   goForward: () => void;
+  reload: () => void;
 };
 
 const emptyProviderDraft: ProviderDraft = {
@@ -52,6 +55,8 @@ export default function PopupWindow() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('window');
   const [loadingByProvider, setLoadingByProvider] = useState<Record<string, boolean>>({});
   const [hotkeyDraft, setHotkeyDraft] = useState('');
+  const [hotkeyListening, setHotkeyListening] = useState(false);
+  const [hotkeyError, setHotkeyError] = useState('');
   const [providerDraft, setProviderDraft] = useState<ProviderDraft>(emptyProviderDraft);
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
   const [providerFormOpen, setProviderFormOpen] = useState(false);
@@ -62,6 +67,11 @@ export default function PopupWindow() {
   const [providerToDelete, setProviderToDelete] = useState<string | null>(null);
   const webviewRefs = useRef<Record<string, WebviewElement | null>>({});
   const webviewCleanupRefs = useRef<Record<string, (() => void) | undefined>>({});
+  const providerLastUrlsRef = useRef<Record<string, string>>({});
+  const unloadTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
+  const loadedProviderIdsRef = useRef<Set<string>>(new Set());
+  const selectedProviderIdRef = useRef('');
+  const [loadedProviderIds, setLoadedProviderIds] = useState<Set<string>>(() => new Set());
   const providerStripRef = useRef<HTMLDivElement>(null);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
   const [isVisible, setIsVisible] = useState(true);
@@ -95,6 +105,74 @@ export default function PopupWindow() {
     }
   };
 
+  function updateLoadedProviders(updater: (current: Set<string>) => Set<string>) {
+    setLoadedProviderIds((current) => {
+      const next = updater(new Set(current));
+      loadedProviderIdsRef.current = next;
+      return next;
+    });
+  }
+
+  function clearUnloadTimer(providerId: string) {
+    const timer = unloadTimersRef.current[providerId];
+
+    if (timer) {
+      clearTimeout(timer);
+      unloadTimersRef.current[providerId] = undefined;
+    }
+  }
+
+  function rememberProviderUrl(providerId: string) {
+    const webview = webviewRefs.current[providerId];
+
+    if (!webview || typeof webview.getURL !== 'function') {
+      return;
+    }
+
+    try {
+      const url = webview.getURL();
+
+      if (isHttpUrl(url)) {
+        providerLastUrlsRef.current[providerId] = url;
+      }
+    } catch {
+      // The webview can be torn down while memory saver is unloading it.
+    }
+  }
+
+  function unloadProvider(providerId: string) {
+    if (selectedProviderIdRef.current === providerId) {
+      return;
+    }
+
+    rememberProviderUrl(providerId);
+    clearUnloadTimer(providerId);
+    setLoadingByProvider((current) => ({
+      ...current,
+      [providerId]: false
+    }));
+    updateLoadedProviders((current) => {
+      current.delete(providerId);
+      return current;
+    });
+  }
+
+  function scheduleProviderUnload(providerId: string, unloadMinutes: number) {
+    clearUnloadTimer(providerId);
+
+    if (selectedProviderIdRef.current === providerId) {
+      return;
+    }
+
+    unloadTimersRef.current[providerId] = setTimeout(() => {
+      unloadProvider(providerId);
+    }, unloadMinutes * 60 * 1000);
+  }
+
+  function getProviderStartUrl(provider: Provider) {
+    return providerLastUrlsRef.current[provider.id] ?? provider.url;
+  }
+
   useEffect(() => {
     checkStripScroll();
     window.addEventListener('resize', checkStripScroll);
@@ -112,11 +190,13 @@ export default function PopupWindow() {
       setSettings(nextSettings);
       setSelectedProviderId(nextSettings.defaultProviderId);
       setHotkeyDraft(nextSettings.globalHotkey);
+      setHotkeyError('');
     });
 
     const removeSettingsListener = window.floatAI.onSettingsChanged((nextSettings) => {
       setSettings(nextSettings);
       setHotkeyDraft((current) => current || nextSettings.globalHotkey);
+      setHotkeyError('');
       setSelectedProviderId((current) =>
         nextSettings.providers.some((provider) => provider.id === current) ? current : nextSettings.defaultProviderId
       );
@@ -174,8 +254,54 @@ export default function PopupWindow() {
         cleanup?.();
       }
       webviewCleanupRefs.current = {};
+      for (const providerId of Object.keys(unloadTimersRef.current)) {
+        clearUnloadTimer(providerId);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!hotkeyListening) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (event.key === 'Escape') {
+        setHotkeyListening(false);
+        setHotkeyError('');
+        return;
+      }
+
+      const captured = acceleratorFromKeyboardEvent(event, isMac);
+
+      if (!captured.accelerator) {
+        setHotkeyError(captured.error ?? 'Press a complete shortcut.');
+        return;
+      }
+
+      setHotkeyDraft(captured.accelerator);
+      setHotkeyError('');
+      setHotkeyListening(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [hotkeyListening, isMac]);
+
+  useEffect(() => {
+    if (!hotkeyListening) {
+      window.floatAI.setShortcutCaptureActive(false).catch(() => undefined);
+      return undefined;
+    }
+
+    return () => {
+      window.floatAI.setShortcutCaptureActive(false).catch(() => undefined);
+    };
+  }, [hotkeyListening]);
 
   const selectedProvider = useMemo<Provider | undefined>(() => {
     if (!settings) {
@@ -188,6 +314,60 @@ export default function PopupWindow() {
       settings.providers[0]
     );
   }, [selectedProviderId, settings]);
+
+  const providerIdsSignature = settings?.providers.map((provider) => provider.id).join('|') ?? '';
+  const memorySaverEnabled = settings?.performance.memorySaver ?? true;
+  const memorySaverUnloadMinutes = settings?.performance.memorySaverUnloadMinutes ?? 2;
+
+  useEffect(() => {
+    selectedProviderIdRef.current = selectedProviderId;
+  }, [selectedProviderId]);
+
+  useEffect(() => {
+    if (!settings || !selectedProvider) {
+      return;
+    }
+
+    const providerIds = new Set(settings.providers.map((provider) => provider.id));
+
+    for (const providerId of Object.keys(unloadTimersRef.current)) {
+      if (!providerIds.has(providerId)) {
+        clearUnloadTimer(providerId);
+      }
+    }
+
+    for (const providerId of Object.keys(providerLastUrlsRef.current)) {
+      if (!providerIds.has(providerId)) {
+        delete providerLastUrlsRef.current[providerId];
+      }
+    }
+
+    if (!memorySaverEnabled) {
+      for (const providerId of Object.keys(unloadTimersRef.current)) {
+        clearUnloadTimer(providerId);
+      }
+
+      updateLoadedProviders(() => providerIds);
+      return;
+    }
+
+    clearUnloadTimer(selectedProvider.id);
+    updateLoadedProviders((current) => {
+      current.add(selectedProvider.id);
+      for (const providerId of Array.from(current)) {
+        if (!providerIds.has(providerId)) {
+          current.delete(providerId);
+        }
+      }
+      return current;
+    });
+
+    for (const providerId of Array.from(loadedProviderIdsRef.current)) {
+      if (providerId !== selectedProvider.id && providerIds.has(providerId)) {
+        scheduleProviderUnload(providerId, memorySaverUnloadMinutes);
+      }
+    }
+  }, [memorySaverEnabled, memorySaverUnloadMinutes, providerIdsSignature, selectedProvider?.id, settings]);
 
   const providerIconSignature =
     settings?.providers.map((provider) => `${provider.id}:${provider.icon}`).join('|') ?? '';
@@ -240,6 +420,41 @@ export default function PopupWindow() {
     return nextSettings;
   }
 
+  async function saveHotkeyDraft() {
+    if (!settings) {
+      return;
+    }
+
+    const normalizedHotkey = normalizeAcceleratorText(hotkeyDraft, isMac) || settings.globalHotkey;
+    const validationError = validateAcceleratorText(normalizedHotkey);
+
+    if (validationError) {
+      setHotkeyError(validationError);
+      return;
+    }
+
+    try {
+      const nextSettings = await persist({ globalHotkey: normalizedHotkey });
+      setHotkeyDraft(nextSettings.globalHotkey);
+      setHotkeyListening(false);
+      setHotkeyError('');
+    } catch (error) {
+      setHotkeyError(error instanceof Error ? error.message : 'Could not register this shortcut.');
+    }
+  }
+
+  async function startHotkeyListening() {
+    setHotkeyError('');
+
+    try {
+      await window.floatAI.setShortcutCaptureActive(true);
+      setHotkeyListening(true);
+    } catch {
+      setHotkeyListening(false);
+      setHotkeyError('Could not pause the current shortcut. Please try listening again.');
+    }
+  }
+
   function patchPopup(patch: DeepPartial<FloatAISettings>['popup']) {
     return persist({
       popup: patch
@@ -247,6 +462,10 @@ export default function PopupWindow() {
   }
 
   async function handleProviderChange(providerId: string) {
+    if (selectedProviderId) {
+      rememberProviderUrl(selectedProviderId);
+    }
+
     setSelectedProviderId(providerId);
     setSettingsOpen(false);
     await window.floatAI.switchProvider(providerId);
@@ -426,15 +645,23 @@ export default function PopupWindow() {
 
     const handleStartLoading = () => setProviderLoading(true);
     const handleStopLoading = () => setProviderLoading(false);
+    const handleNavigation = () => rememberProviderUrl(providerId);
 
     element.addEventListener('did-start-loading', handleStartLoading);
     element.addEventListener('did-stop-loading', handleStopLoading);
     element.addEventListener('did-fail-load', handleStopLoading);
+    element.addEventListener('did-navigate', handleNavigation);
+    element.addEventListener('did-navigate-in-page', handleNavigation);
+    element.addEventListener('dom-ready', handleNavigation);
 
     webviewCleanupRefs.current[providerId] = () => {
+      rememberProviderUrl(providerId);
       element.removeEventListener('did-start-loading', handleStartLoading);
       element.removeEventListener('did-stop-loading', handleStopLoading);
       element.removeEventListener('did-fail-load', handleStopLoading);
+      element.removeEventListener('did-navigate', handleNavigation);
+      element.removeEventListener('did-navigate-in-page', handleNavigation);
+      element.removeEventListener('dom-ready', handleNavigation);
     };
   }
 
@@ -578,16 +805,25 @@ export default function PopupWindow() {
       {loadingByProvider[selectedProvider.id] && <div className="webview-progress" />}
       <main className="popup-content">
         <div className="webview-stack">
-          {settings.providers.map((provider) => (
-            <webview
-              key={provider.id}
-              ref={(element) => setWebviewRef(provider.id, element as WebviewElement | null)}
-              className={provider.id === selectedProvider.id ? 'provider-webview active' : 'provider-webview'}
-              src={provider.url}
-              partition="persist:floatai-sites"
-              allowpopups
-            />
-          ))}
+          {settings.providers.map((provider) => {
+            const shouldKeepLoaded =
+              !memorySaverEnabled || provider.id === selectedProvider.id || loadedProviderIds.has(provider.id);
+
+            if (!shouldKeepLoaded) {
+              return null;
+            }
+
+            return (
+              <webview
+                key={provider.id}
+                ref={(element) => setWebviewRef(provider.id, element as WebviewElement | null)}
+                className={provider.id === selectedProvider.id ? 'provider-webview active' : 'provider-webview'}
+                src={getProviderStartUrl(provider)}
+                partition="persist:floatai-sites"
+                allowpopups
+              />
+            );
+          })}
         </div>
 
         {settingsOpen && (
@@ -622,6 +858,13 @@ export default function PopupWindow() {
                 onClick={() => setSettingsTab('shortcut')}
               >
                 Shortcut
+              </button>
+              <button
+                type="button"
+                className={settingsTab === 'performance' ? 'drawer-tab active' : 'drawer-tab'}
+                onClick={() => setSettingsTab('performance')}
+              >
+                Performance
               </button>
             </div>
 
@@ -742,30 +985,80 @@ export default function PopupWindow() {
 
             {settingsTab === 'shortcut' && (
               <div className="drawer-section">
-                <div className="compact-field">
+                <div className={hotkeyListening ? 'compact-field shortcut-field listening' : 'compact-field shortcut-field'}>
                   <span>Global hotkey</span>
-                  <div className="inline-control">
+                  <div className="shortcut-control">
                     <input
                       className="input"
-                      value={hotkeyDraft}
-                      onChange={(event) => setHotkeyDraft(event.target.value)}
+                      value={hotkeyListening ? 'Listening...' : hotkeyDraft}
+                      onChange={(event) => {
+                        setHotkeyDraft(event.target.value);
+                        setHotkeyError('');
+                      }}
+                      readOnly={hotkeyListening}
                       placeholder={isMac ? 'Option+Space' : 'F20'}
                     />
                     <button
+                      className={hotkeyListening ? 'shortcut-listen-button active' : 'shortcut-listen-button'}
+                      type="button"
+                      onClick={() => {
+                        setHotkeyError('');
+                        if (hotkeyListening) {
+                          setHotkeyListening(false);
+                        } else {
+                          void startHotkeyListening();
+                        }
+                      }}
+                    >
+                      {hotkeyListening ? <X size={16} /> : <Keyboard size={16} />}
+                      {hotkeyListening ? 'Cancel' : 'Listen'}
+                    </button>
+                    <button
                       className="primary-button compact"
                       type="button"
-                      onClick={() => persist({ globalHotkey: hotkeyDraft.trim() || settings.globalHotkey })}
+                      onClick={saveHotkeyDraft}
+                      disabled={hotkeyListening}
                     >
                       <Save size={16} />
-                      Save
+                      Apply
                     </button>
                   </div>
                 </div>
+                {hotkeyError && <div className="shortcut-error">{hotkeyError}</div>}
                 <CompactToggleRow
                   label="Ctrl +/- to zoom"
                   checked={settings.enableZoomShortcuts}
                   onChange={(enableZoomShortcuts) => persist({ enableZoomShortcuts })}
                 />
+              </div>
+            )}
+
+            {settingsTab === 'performance' && (
+              <div className="drawer-section">
+                <CompactToggleRow
+                  label="Memory saver"
+                  checked={settings.performance.memorySaver}
+                  onChange={(memorySaver) => persist({ performance: { memorySaver } })}
+                  tooltip="Unloads inactive AI pages after a short delay while keeping cookies and restoring the last visited URL."
+                  tooltipPlacement="bottom"
+                />
+                <CompactNumberRow
+                  label="Unload after (min)"
+                  value={settings.performance.memorySaverUnloadMinutes}
+                  min={1}
+                  max={60}
+                  onChange={(memorySaverUnloadMinutes) =>
+                    persist({ performance: { memorySaverUnloadMinutes } })
+                  }
+                />
+                {isMac && (
+                  <CompactToggleRow
+                    label="Hardware acceleration"
+                    checked={settings.performance.hardwareAcceleration}
+                    onChange={(hardwareAcceleration) => persist({ performance: { hardwareAcceleration } })}
+                    tooltip="Uses the Mac GPU for smoother webview scrolling. Restart FloatAI after changing this."
+                  />
+                )}
               </div>
             )}
 
@@ -858,6 +1151,196 @@ export default function PopupWindow() {
       </main>
     </div>
   );
+}
+
+type AcceleratorCaptureResult = {
+  accelerator?: string;
+  error?: string;
+};
+
+const modifierKeys = new Set(['Alt', 'AltGraph', 'Control', 'Meta', 'OS', 'Shift']);
+const manualModifierAliases = new Map([
+  ['cmd', 'Command'],
+  ['command', 'Command'],
+  ['ctrl', 'Control'],
+  ['control', 'Control'],
+  ['option', 'Option'],
+  ['opt', 'Option'],
+  ['alt', 'Alt'],
+  ['shift', 'Shift'],
+  ['super', 'Super'],
+  ['win', 'Super'],
+  ['windows', 'Super'],
+  ['meta', 'Super'],
+  ['commandorcontrol', 'CommandOrControl'],
+  ['cmdorctrl', 'CommandOrControl'],
+  ['ctrlorcmd', 'CommandOrControl']
+]);
+
+function acceleratorFromKeyboardEvent(event: KeyboardEvent, isMac: boolean): AcceleratorCaptureResult {
+  if (modifierKeys.has(event.key)) {
+    return {
+      error: 'Press one more key.'
+    };
+  }
+
+  const key = acceleratorKeyFromEvent(event);
+
+  if (!key) {
+    return {
+      error: 'This key cannot be used as a shortcut.'
+    };
+  }
+
+  const modifiers = acceleratorModifiersFromEvent(event, isMac);
+  const canUseWithoutModifier = isStandaloneAcceleratorKey(key);
+
+  if (modifiers.length === 0 && !canUseWithoutModifier) {
+    return {
+      error: 'Use at least one modifier key.'
+    };
+  }
+
+  return {
+    accelerator: [...modifiers, key].join('+')
+  };
+}
+
+function acceleratorModifiersFromEvent(event: KeyboardEvent, isMac: boolean): string[] {
+  const modifiers: string[] = [];
+
+  if (isMac) {
+    if (event.metaKey) modifiers.push('Command');
+    if (event.ctrlKey) modifiers.push('Control');
+    if (event.altKey) modifiers.push('Option');
+    if (event.shiftKey) modifiers.push('Shift');
+    return modifiers;
+  }
+
+  if (event.ctrlKey) modifiers.push('Control');
+  if (event.altKey) modifiers.push('Alt');
+  if (event.shiftKey) modifiers.push('Shift');
+  if (event.metaKey) modifiers.push('Super');
+
+  return modifiers;
+}
+
+function acceleratorKeyFromEvent(event: KeyboardEvent): string | null {
+  const code = event.code;
+
+  if (/^Key[A-Z]$/.test(code)) {
+    return code.slice('Key'.length);
+  }
+
+  if (/^Digit[0-9]$/.test(code)) {
+    return code.slice('Digit'.length);
+  }
+
+  if (/^Numpad[0-9]$/.test(code)) {
+    return `num${code.slice('Numpad'.length)}`;
+  }
+
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(event.key)) {
+    return event.key.toUpperCase();
+  }
+
+  const keyByCode: Record<string, string> = {
+    ArrowDown: 'Down',
+    ArrowLeft: 'Left',
+    ArrowRight: 'Right',
+    ArrowUp: 'Up',
+    Backspace: 'Backspace',
+    Delete: 'Delete',
+    End: 'End',
+    Enter: 'Enter',
+    Equal: event.shiftKey ? 'Plus' : '=',
+    Home: 'Home',
+    Insert: 'Insert',
+    Minus: 'Minus',
+    NumpadAdd: 'Plus',
+    NumpadDecimal: 'Decimal',
+    NumpadDivide: 'Divide',
+    NumpadMultiply: 'Multiply',
+    NumpadSubtract: 'Subtract',
+    PageDown: 'PageDown',
+    PageUp: 'PageUp',
+    Space: 'Space',
+    Tab: 'Tab'
+  };
+
+  if (keyByCode[code]) {
+    return keyByCode[code];
+  }
+
+  const mediaKeyByKey: Record<string, string> = {
+    AudioVolumeDown: 'VolumeDown',
+    AudioVolumeMute: 'VolumeMute',
+    AudioVolumeUp: 'VolumeUp',
+    MediaNextTrack: 'MediaNextTrack',
+    MediaPlayPause: 'MediaPlayPause',
+    MediaPreviousTrack: 'MediaPreviousTrack',
+    MediaStop: 'MediaStop'
+  };
+
+  return mediaKeyByKey[event.key] ?? null;
+}
+
+function isStandaloneAcceleratorKey(key: string): boolean {
+  return /^F([1-9]|1[0-9]|2[0-4])$/.test(key) || key.startsWith('Media') || key.startsWith('Volume');
+}
+
+function normalizeAcceleratorText(value: string, isMac: boolean): string {
+  const parts = value
+    .trim()
+    .split('+')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  return parts
+    .map((part) => {
+      const normalizedPart = part.replace(/\s+/g, '');
+      const alias = manualModifierAliases.get(normalizedPart.toLowerCase());
+
+      if (alias === 'Alt' && isMac) {
+        return 'Option';
+      }
+
+      if (alias) {
+        return alias;
+      }
+
+      if (/^f([1-9]|1[0-9]|2[0-4])$/i.test(normalizedPart)) {
+        return normalizedPart.toUpperCase();
+      }
+
+      if (/^[a-z]$/i.test(normalizedPart)) {
+        return normalizedPart.toUpperCase();
+      }
+
+      return normalizedPart;
+    })
+    .join('+');
+}
+
+function validateAcceleratorText(value: string): string {
+  const parts = value.split('+').map((part) => part.trim()).filter(Boolean);
+
+  if (parts.length === 0) {
+    return 'Choose a shortcut first.';
+  }
+
+  const key = parts[parts.length - 1];
+  const modifiers = new Set(['Command', 'CommandOrControl', 'Control', 'Option', 'Alt', 'AltGr', 'Shift', 'Super']);
+
+  if (modifiers.has(key)) {
+    return 'Press one more key.';
+  }
+
+  if (parts.length === 1 && !isStandaloneAcceleratorKey(key)) {
+    return 'Use at least one modifier key.';
+  }
+
+  return '';
 }
 
 function ProviderLogo({ iconUrl, provider }: { iconUrl?: string; provider: Provider }) {
@@ -956,19 +1439,21 @@ function CompactToggleRow({
   checked,
   label,
   onChange,
-  tooltip
+  tooltip,
+  tooltipPlacement = 'top'
 }: {
   checked: boolean;
   label: string;
   onChange: (checked: boolean) => void;
   tooltip?: string;
+  tooltipPlacement?: 'top' | 'bottom';
 }) {
   return (
     <div className="compact-toggle-row">
       <span className="compact-toggle-label-wrapper">
         <span>{label}</span>
         {tooltip && (
-          <span className="tooltip-container">
+          <span className={`tooltip-container tooltip-${tooltipPlacement}`}>
             <HelpCircle size={14} className="help-icon" />
             <span className="tooltip-text">{tooltip}</span>
           </span>

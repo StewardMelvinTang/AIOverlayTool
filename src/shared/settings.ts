@@ -27,6 +27,12 @@ export type PrivacySettings = {
   captureProtection: boolean;
 };
 
+export type PerformanceSettings = {
+  hardwareAcceleration: boolean;
+  memorySaver: boolean;
+  memorySaverUnloadMinutes: number;
+};
+
 export type FloatAISettings = {
   defaultProviderId: string;
   globalHotkey: string;
@@ -36,6 +42,7 @@ export type FloatAISettings = {
   providers: Provider[];
   clipboard: ClipboardSettings;
   privacy: PrivacySettings;
+  performance: PerformanceSettings;
   enableZoomShortcuts: boolean;
   darkMode: boolean;
 };
@@ -101,6 +108,11 @@ export const defaultSettings: FloatAISettings = {
   },
   privacy: {
     captureProtection: false
+  },
+  performance: {
+    hardwareAcceleration: true,
+    memorySaver: true,
+    memorySaverUnloadMinutes: 2
   },
   enableZoomShortcuts: false,
   darkMode: true
@@ -202,6 +214,24 @@ export function normalizeSettings(value: unknown): FloatAISettings {
           ? input.privacy.captureProtection
           : defaultSettings.privacy.captureProtection
     },
+    performance: {
+      ...defaultSettings.performance,
+      ...(input.performance ?? {}),
+      hardwareAcceleration:
+        typeof input.performance?.hardwareAcceleration === 'boolean'
+          ? input.performance.hardwareAcceleration
+          : defaultSettings.performance.hardwareAcceleration,
+      memorySaver:
+        typeof input.performance?.memorySaver === 'boolean'
+          ? input.performance.memorySaver
+          : defaultSettings.performance.memorySaver,
+      memorySaverUnloadMinutes: clampNumber(
+        input.performance?.memorySaverUnloadMinutes,
+        1,
+        60,
+        defaultSettings.performance.memorySaverUnloadMinutes
+      )
+    },
     enableZoomShortcuts:
       typeof input.enableZoomShortcuts === 'boolean'
         ? input.enableZoomShortcuts
@@ -231,6 +261,10 @@ export function deepMergeSettings(
     privacy: {
       ...current.privacy,
       ...(patch.privacy ?? {})
+    },
+    performance: {
+      ...current.performance,
+      ...(patch.performance ?? {})
     },
     providers: patch.providers ?? current.providers
   });

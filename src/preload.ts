@@ -15,6 +15,7 @@ const bridge: FloatAIBridge = {
   openSettings: () => ipcRenderer.invoke('window:openSettings') as Promise<void>,
   togglePopup: () => ipcRenderer.invoke('popup:toggle') as Promise<void>,
   hidePopup: () => ipcRenderer.invoke('popup:hide') as Promise<void>,
+  setShortcutCaptureActive: (active: boolean) => ipcRenderer.invoke('shortcut:captureActive', active) as Promise<void>,
   switchProvider: (providerId: string) => ipcRenderer.invoke('provider:switch', providerId) as Promise<Provider>,
   pickProviderIcon: () => ipcRenderer.invoke('provider:pickIcon'),
   resolveProviderIcon: (icon: string) => ipcRenderer.invoke('provider:resolveIcon', icon) as Promise<string>,
