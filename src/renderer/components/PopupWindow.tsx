@@ -785,7 +785,7 @@ export default function PopupWindow() {
                 title={provider.url}
               >
                 <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
-                <span>{provider.name}</span>
+                {(!settings.compactProviderBar || provider.id === selectedProvider.id) && <span>{provider.name}</span>}
               </button>
             ))}
           </div>
@@ -826,8 +826,7 @@ export default function PopupWindow() {
           })}
         </div>
 
-        {settingsOpen && (
-          <aside className="settings-drawer no-drag">
+        <aside className={`settings-drawer no-drag ${settingsOpen ? 'open' : ''}`}>
             <div className="drawer-header">
               <div>
                 <h1>Settings</h1>
@@ -873,7 +872,7 @@ export default function PopupWindow() {
                 <div className="compact-field">
                   <span>Window Size</span>
                   <div className="inline-control">
-                    <span style={{ color: '#edf1f3', fontSize: 13, lineHeight: '36px' }}>
+                    <span style={{ color: '#edf1f3', fontSize: 13 }}>
                       {settings.popup.width} &times; {settings.popup.height}
                     </span>
                     <button className="primary-button compact" type="button" onClick={() => setIsResizingMode(true)}>
@@ -926,6 +925,7 @@ export default function PopupWindow() {
                   label="Hide on defocus"
                   checked={settings.popup.hideOnBlur}
                   onChange={(hideOnBlur) => patchPopup({ hideOnBlur })}
+                  tooltip="Automatically hides FloatAI when you click outside the window."
                 />
                 <CompactToggleRow
                   label={isMac ? 'Menu bar icon' : 'Tray icon'}
@@ -976,10 +976,18 @@ export default function PopupWindow() {
                     </div>
                   ))}
                 </div>
-                <button className="add-provider-button" type="button" onClick={startAddProvider}>
-                  <Plus size={16} />
-                  Add provider
-                </button>
+                <div style={{ marginTop: 'auto' }}>
+                  <CompactToggleRow
+                    label="Compact bar"
+                    checked={settings.compactProviderBar ?? false}
+                    onChange={(compactProviderBar) => persist({ compactProviderBar })}
+                    tooltip="Hide provider names in the top bar to save space. Active provider name is always shown."
+                  />
+                  <button className="add-provider-button" style={{ marginTop: '10px' }} type="button" onClick={startAddProvider}>
+                    <Plus size={16} />
+                    Add provider
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1147,7 +1155,6 @@ export default function PopupWindow() {
               </div>
             )}
           </aside>
-        )}
       </main>
     </div>
   );

@@ -45,6 +45,7 @@ export type FloatAISettings = {
   performance: PerformanceSettings;
   enableZoomShortcuts: boolean;
   darkMode: boolean;
+  compactProviderBar: boolean;
 };
 
 export type DeepPartial<T> = {
@@ -115,7 +116,8 @@ export const defaultSettings: FloatAISettings = {
     memorySaverUnloadMinutes: 2
   },
   enableZoomShortcuts: false,
-  darkMode: true
+  darkMode: true,
+  compactProviderBar: false
 };
 
 export function isBuiltInProvider(providerId: string): boolean {
@@ -239,7 +241,11 @@ export function normalizeSettings(value: unknown): FloatAISettings {
     darkMode:
       typeof input.darkMode === 'boolean'
         ? input.darkMode
-        : defaultSettings.darkMode
+        : defaultSettings.darkMode,
+    compactProviderBar:
+      typeof input.compactProviderBar === 'boolean'
+        ? input.compactProviderBar
+        : defaultSettings.compactProviderBar
   };
 }
 
