@@ -321,9 +321,9 @@ export default function PopupWindow() {
         providers: settings.providers.map((provider) =>
           provider.id === editingProviderId
             ? {
-                ...provider,
-                ...trimmedDraft
-              }
+              ...provider,
+              ...trimmedDraft
+            }
             : provider
         )
       });
@@ -594,7 +594,7 @@ export default function PopupWindow() {
                     </button>
                   </div>
                 </div>
-                 <CompactSliderRow
+                <CompactSliderRow
                   label="Transparency"
                   value={Math.round(settings.popup.opacity * 100)}
                   min={60}
@@ -602,7 +602,7 @@ export default function PopupWindow() {
                   suffix="%"
                   onChange={(opacity) => patchPopup({ opacity: opacity / 100 })}
                 />
-                 <div className="theme-segmented-row">
+                <div className="theme-segmented-row">
                   <span>Theme</span>
                   <div className="segmented-control">
                     <div className={`segmented-slider ${settings.darkMode ? 'dark-active' : 'light-active'}`} />
@@ -634,7 +634,7 @@ export default function PopupWindow() {
                   checked={settings.popup.rememberPosition}
                   onChange={(rememberPosition) => patchPopup({ rememberPosition })}
                 />
-                 <CompactToggleRow
+                <CompactToggleRow
                   label="Hide on defocus"
                   checked={settings.popup.hideOnBlur}
                   onChange={(hideOnBlur) => patchPopup({ hideOnBlur })}
@@ -649,7 +649,7 @@ export default function PopupWindow() {
                   checked={settings.launchAtStartup}
                   onChange={(launchAtStartup) => persist({ launchAtStartup })}
                 />
-                 <CompactToggleRow
+                <CompactToggleRow
                   label="Privacy Capture Protection"
                   checked={settings.privacy?.captureProtection ?? false}
                   onChange={(captureProtection) => persist({ privacy: { captureProtection } })}
