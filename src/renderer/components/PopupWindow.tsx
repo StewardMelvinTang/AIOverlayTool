@@ -776,18 +776,37 @@ export default function PopupWindow() {
             onScroll={checkStripScroll}
             onWheel={handleWheel}
           >
-            {settings.providers.map((provider) => (
-              <button
-                key={provider.id}
-                type="button"
-                className={provider.id === selectedProvider.id ? 'provider-pill active' : 'provider-pill'}
-                onClick={() => handleProviderChange(provider.id)}
-                title={provider.url}
-              >
-                <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
-                {(!settings.compactProviderBar || provider.id === selectedProvider.id) && <span>{provider.name}</span>}
-              </button>
-            ))}
+            {settings.providers.map((provider) => {
+              const isActiveProvider = provider.id === selectedProvider.id;
+              const isCompactProviderBar = settings.compactProviderBar ?? false;
+              const showProviderLabel = !isCompactProviderBar || isActiveProvider;
+
+              return (
+                <button
+                  key={provider.id}
+                  type="button"
+                  className={[
+                    'provider-pill',
+                    isActiveProvider ? 'active' : '',
+                    isCompactProviderBar ? 'compact-provider-pill' : '',
+                    showProviderLabel ? 'has-visible-label' : ''
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onClick={() => handleProviderChange(provider.id)}
+                  title={provider.url}
+                  aria-label={provider.name}
+                >
+                  <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
+                  <span
+                    className={showProviderLabel ? 'provider-pill-label visible' : 'provider-pill-label'}
+                    aria-hidden={!showProviderLabel}
+                  >
+                    {provider.name}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
         <button
@@ -869,10 +888,10 @@ export default function PopupWindow() {
 
             {settingsTab === 'window' && (
               <div className="drawer-section">
-                <div className="compact-field">
+                <div className="compact-field window-size-field">
                   <span>Window Size</span>
-                  <div className="inline-control">
-                    <span style={{ color: '#edf1f3', fontSize: 13 }}>
+                  <div className="window-size-control">
+                    <span className="window-size-value">
                       {settings.popup.width} &times; {settings.popup.height}
                     </span>
                     <button className="primary-button compact" type="button" onClick={() => setIsResizingMode(true)}>
