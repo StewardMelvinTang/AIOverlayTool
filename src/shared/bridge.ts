@@ -18,11 +18,13 @@ export type ProviderIconPickResult = {
 };
 
 export type FloatAIBridge = {
+  platform: string;
   getSettings: () => Promise<FloatAISettings>;
   updateSettings: (patch: DeepPartial<FloatAISettings>) => Promise<FloatAISettings>;
   openSettings: () => Promise<void>;
   togglePopup: () => Promise<void>;
   hidePopup: () => Promise<void>;
+  setShortcutCaptureActive: (active: boolean) => Promise<void>;
   switchProvider: (providerId: string) => Promise<Provider>;
   pickProviderIcon: () => Promise<ProviderIconPickResult | null>;
   resolveProviderIcon: (icon: string) => Promise<string>;

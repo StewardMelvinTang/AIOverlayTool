@@ -1,14 +1,21 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { FloatAIBridge, PopupPosition, PopupSize, WebviewNavigationDirection } from './shared/bridge';
+import type {
+  FloatAIBridge,
+  PopupPosition,
+  PopupSize,
+  WebviewNavigationDirection
+} from './shared/bridge';
 import type { DeepPartial, FloatAISettings, Provider } from './shared/settings';
 
 const bridge: FloatAIBridge = {
+  platform: process.platform,
   getSettings: () => ipcRenderer.invoke('settings:get') as Promise<FloatAISettings>,
   updateSettings: (patch: DeepPartial<FloatAISettings>) =>
     ipcRenderer.invoke('settings:update', patch) as Promise<FloatAISettings>,
   openSettings: () => ipcRenderer.invoke('window:openSettings') as Promise<void>,
   togglePopup: () => ipcRenderer.invoke('popup:toggle') as Promise<void>,
   hidePopup: () => ipcRenderer.invoke('popup:hide') as Promise<void>,
+  setShortcutCaptureActive: (active: boolean) => ipcRenderer.invoke('shortcut:captureActive', active) as Promise<void>,
   switchProvider: (providerId: string) => ipcRenderer.invoke('provider:switch', providerId) as Promise<Provider>,
   pickProviderIcon: () => ipcRenderer.invoke('provider:pickIcon'),
   resolveProviderIcon: (icon: string) => ipcRenderer.invoke('provider:resolveIcon', icon) as Promise<string>,

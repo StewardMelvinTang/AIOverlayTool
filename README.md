@@ -1,17 +1,19 @@
 # FloatAI Launcher
 
-FloatAI Launcher is a Windows desktop Electron app that opens a floating, always-on-top AI launcher with a global shortcut. It uses a React + TypeScript renderer, Electron IPC, `electron-store` for local settings, a system tray menu, and an Electron `webview` for AI websites.
+FloatAI Launcher is a macOS and Windows Electron app that opens a floating, always-on-top AI launcher with a global shortcut. It uses a React + TypeScript renderer, Electron IPC, `electron-store` for local settings, a menu bar/tray menu, and an Electron `webview` for AI websites.
 
 ## Features
 
-- Popup window toggled by `F20` by default.
+- Popup window toggled by `Option+Space` on macOS and `F20` on Windows by default.
 - Integrated settings drawer inside the popup with Window, Providers, and Shortcut sections.
 - Provider manager for ChatGPT, Claude, Gemini, and custom bookmarks.
 - Bundled provider PNG icons plus a picker that copies custom PNG icons into app data.
 - Popup sizing controlled from settings.
-- Optional chrome transparency, always-on-top, remember position, hide-on-blur, launch-at-startup, and tray icon settings.
+- Optional chrome transparency, always-on-top, remember position, hide-on-blur, launch-at-startup, and tray/menu bar settings.
+- Performance settings for Memory Saver and macOS hardware acceleration.
+- Memory Saver unloads inactive AI pages and restores their last visited URL when reopened.
 - Mouse back and forward buttons navigate the active provider page.
-- System tray menu with Open Popup, Open Settings, and Quit.
+- Visible macOS `AI` menu bar item and Windows system tray menu with Open Popup, Open Settings, Refresh Pages, and Quit.
 - AI pages load in Electron `webview`, not an iframe.
 
 ## Project Structure
@@ -60,13 +62,14 @@ The dev command compiles the Electron main/preload files, starts Vite for the Re
 npm run build
 ```
 
-## Windows Package
+## Native Packages
 
 ```bash
-npm run dist
+npm run dist:mac
+npm run dist:win
 ```
 
-`electron-builder` outputs Windows installers/packages into `release/`.
+`electron-builder` outputs installers/packages into `release/`. The generic `npm run dist` command builds for the current platform.
 
 ## Local Settings
 
@@ -75,7 +78,7 @@ Settings are saved through `electron-store` under the app name `float-ai-launche
 ```json
 {
   "defaultProviderId": "chatgpt",
-  "globalHotkey": "F20",
+  "globalHotkey": "Option+Space",
   "popup": {
     "width": 900,
     "height": 700,
@@ -99,6 +102,11 @@ Settings are saved through `electron-store` under the app name `float-ai-launche
   "clipboard": {
     "copySelectedTextBeforeOpen": false,
     "autoPaste": false
+  },
+  "performance": {
+    "hardwareAcceleration": true,
+    "memorySaver": true,
+    "memorySaverUnloadMinutes": 2
   }
 }
 ```
@@ -109,9 +117,10 @@ Electron global shortcuts use accelerator strings such as:
 
 ```text
 F20
+Option+Space
 CommandOrControl+Space
 Control+Alt+A
 CommandOrControl+Shift+K
 ```
 
-If a shortcut is already taken by Windows or another app, Electron may fail to register it. Choose another shortcut in Settings > Shortcuts.
+If a shortcut is already taken by the OS or another app, Electron may fail to register it. Choose another shortcut in Settings > Shortcuts.
