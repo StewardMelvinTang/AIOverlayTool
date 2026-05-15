@@ -764,32 +764,41 @@ button {
 }
 
 .window-size-field {
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 14px;
-  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-height: 0;
+  padding: 14px 16px;
+}
+
+.window-size-field > span {
+  min-height: 0;
+  line-height: 1;
 }
 
 .window-size-control {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 12px;
   min-width: 0;
+  width: 100%;
 }
 
 .window-size-value {
-  min-width: 78px;
-  color: var(--color-text);
+  color: var(--color-text-muted);
   font-size: 13px;
-  font-weight: 750;
+  font-weight: 600;
   line-height: 1;
-  text-align: right;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  opacity: 0.82;
 }
 
 .window-size-field .primary-button.compact {
-  min-width: 86px;
+  width: auto;
+  min-width: 88px;
   min-height: 34px;
   padding-inline: 12px;
 }
@@ -807,8 +816,15 @@ button {
 }
 
 .shortcut-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shortcut-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -1104,12 +1120,12 @@ button {
   }
 
   .window-size-field {
-    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
     gap: 8px;
   }
 
   .window-size-control {
-    justify-content: space-between;
+    min-width: 0;
   }
 }
 

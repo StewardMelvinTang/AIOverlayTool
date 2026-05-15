@@ -29,7 +29,6 @@ import type { ProviderIconPickResult, PopupPosition, PopupSize } from './shared/
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === 'darwin';
 const macDefaultHotkey = 'Option+Space';
-const macTrayTitle = 'AI';
 const store = new Store<FloatAISettings>({
   name: 'float-ai-launcher',
   defaults: defaultSettings
@@ -91,6 +90,14 @@ function getAppIconPath(): string {
     return customPath;
   }
   return path.join(__dirname, '../icon_256.png');
+}
+
+function getTrayIconPath(): string {
+  const customPath = path.join(app.getAppPath(), 'icon_white.png');
+  if (existsSync(customPath)) {
+    return customPath;
+  }
+  return path.join(__dirname, '../icon_white.png');
 }
 
 function getRendererUrl(windowName: 'popup' | 'settings'): string {
@@ -620,28 +627,13 @@ function syncLaunchAtStartup(): void {
   }
 }
 
-function createMacTrayImage(): Electron.NativeImage {
-  const svg = `
-    <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">
-      <path d="M8 27V9h20v5H14v4h12v4H14v5H8z" fill="#000"/>
-      <circle cx="27" cy="27" r="5" fill="#000"/>
-    </svg>
-  `;
-
-  const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
-  image.setTemplateImage(true);
-  return image.resize({ width: 18, height: 18 });
-}
-
 function createTrayImage(): Electron.NativeImage {
-  if (isMac) {
-    return createMacTrayImage();
-  }
-
-  const iconPath = getAppIconPath();
+  const iconPath = getTrayIconPath();
   if (existsSync(iconPath)) {
     const image = nativeImage.createFromPath(iconPath);
-    return image.resize({ width: 16, height: 16 });
+    const resizedImage = image.resize({ width: isMac ? 18 : 16, height: isMac ? 18 : 16 });
+    resizedImage.setTemplateImage(isMac);
+    return resizedImage;
   }
 
   const svg = `
@@ -653,8 +645,9 @@ function createTrayImage(): Electron.NativeImage {
   `;
 
   const image = nativeImage.createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`);
-  image.setTemplateImage(false);
-  return image;
+  const resizedImage = image.resize({ width: isMac ? 18 : 16, height: isMac ? 18 : 16 });
+  resizedImage.setTemplateImage(isMac);
+  return resizedImage;
 }
 
 function createTrayMenu(): Menu {
@@ -694,7 +687,7 @@ function updateTrayAppearance(): void {
   tray.setToolTip('FloatAI Launcher');
 
   if (isMac) {
-    tray.setTitle(macTrayTitle);
+    tray.setTitle('');
     tray.setIgnoreDoubleClickEvents(true);
   }
 }

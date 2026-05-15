@@ -1025,30 +1025,32 @@ export default function PopupWindow() {
                       readOnly={hotkeyListening}
                       placeholder={isMac ? 'Option+Space' : 'F20'}
                     />
-                    <button
-                      className={hotkeyListening ? 'shortcut-listen-button active' : 'shortcut-listen-button'}
-                      type="button"
-                      onClick={() => {
-                        setHotkeyError('');
-                        if (hotkeyListening) {
-                          setHotkeyListening(false);
-                        } else {
-                          void startHotkeyListening();
-                        }
-                      }}
-                    >
-                      {hotkeyListening ? <X size={16} /> : <Keyboard size={16} />}
-                      {hotkeyListening ? 'Cancel' : 'Listen'}
-                    </button>
-                    <button
-                      className="primary-button compact"
-                      type="button"
-                      onClick={saveHotkeyDraft}
-                      disabled={hotkeyListening}
-                    >
-                      <Save size={16} />
-                      Apply
-                    </button>
+                    <div className="shortcut-actions">
+                      <button
+                        className={hotkeyListening ? 'shortcut-listen-button active' : 'shortcut-listen-button'}
+                        type="button"
+                        onClick={() => {
+                          setHotkeyError('');
+                          if (hotkeyListening) {
+                            setHotkeyListening(false);
+                          } else {
+                            void startHotkeyListening();
+                          }
+                        }}
+                      >
+                        {hotkeyListening ? <X size={16} /> : <Keyboard size={16} />}
+                        {hotkeyListening ? 'Cancel' : 'Listen'}
+                      </button>
+                      <button
+                        className="primary-button compact"
+                        type="button"
+                        onClick={saveHotkeyDraft}
+                        disabled={hotkeyListening}
+                      >
+                        <Save size={16} />
+                        Apply
+                      </button>
+                    </div>
                   </div>
                 </div>
                 {hotkeyError && <div className="shortcut-error">{hotkeyError}</div>}

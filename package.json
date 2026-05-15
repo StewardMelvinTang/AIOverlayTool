@@ -48,6 +48,7 @@
       "dist-electron/**/*",
       "dist-renderer/**/*",
       "provider-icons/**/*",
+      "icon_white.png",
       "icon_256.png",
       "package.json"
     ],
