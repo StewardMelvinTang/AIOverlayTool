@@ -71,6 +71,7 @@ export default function PopupWindow() {
   const unloadTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
   const loadedProviderIdsRef = useRef<Set<string>>(new Set());
   const selectedProviderIdRef = useRef('');
+  const webviewInitialUrlsRef = useRef<Record<string, string>>({});
   const [loadedProviderIds, setLoadedProviderIds] = useState<Set<string>>(() => new Set());
   const providerStripRef = useRef<HTMLDivElement>(null);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
@@ -155,6 +156,7 @@ export default function PopupWindow() {
       current.delete(providerId);
       return current;
     });
+    delete webviewInitialUrlsRef.current[providerId];
   }
 
   function scheduleProviderUnload(providerId: string, unloadMinutes: number) {
@@ -171,6 +173,13 @@ export default function PopupWindow() {
 
   function getProviderStartUrl(provider: Provider) {
     return providerLastUrlsRef.current[provider.id] ?? provider.url;
+  }
+
+  function getWebviewMountUrl(provider: Provider) {
+    if (!webviewInitialUrlsRef.current[provider.id]) {
+      webviewInitialUrlsRef.current[provider.id] = getProviderStartUrl(provider);
+    }
+    return webviewInitialUrlsRef.current[provider.id];
   }
 
   useEffect(() => {
@@ -339,6 +348,12 @@ export default function PopupWindow() {
     for (const providerId of Object.keys(providerLastUrlsRef.current)) {
       if (!providerIds.has(providerId)) {
         delete providerLastUrlsRef.current[providerId];
+      }
+    }
+
+    for (const providerId of Object.keys(webviewInitialUrlsRef.current)) {
+      if (!providerIds.has(providerId)) {
+        delete webviewInitialUrlsRef.current[providerId];
       }
     }
 
@@ -837,7 +852,7 @@ export default function PopupWindow() {
                 key={provider.id}
                 ref={(element) => setWebviewRef(provider.id, element as WebviewElement | null)}
                 className={provider.id === selectedProvider.id ? 'provider-webview active' : 'provider-webview'}
-                src={getProviderStartUrl(provider)}
+                src={getWebviewMountUrl(provider)}
                 partition="persist:floatai-sites"
                 allowpopups
               />
