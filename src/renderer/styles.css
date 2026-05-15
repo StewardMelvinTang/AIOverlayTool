@@ -1,5 +1,6 @@
 :root {
   --chrome-opacity: 1;
+  --toolbar-action-count: 2;
   color: var(--color-text);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -145,10 +146,12 @@ button {
 }
 
 .popup-toolbar {
+  position: relative;
+  z-index: 30;
   height: 52px;
   flex: 0 0 52px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 34px 34px;
+  grid-template-columns: minmax(0, 1fr) repeat(var(--toolbar-action-count), 34px);
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
@@ -284,6 +287,79 @@ button {
   box-shadow: 0 0 0 2px rgba(82, 210, 115, 0.1);
 }
 
+.provider-hover-card {
+  position: absolute;
+  top: calc(100% + 8px);
+  width: min(264px, calc(100vw - 24px));
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px 10px;
+  color: var(--color-text);
+  background: var(--tooltip-bg);
+  border: 1px solid var(--tooltip-border);
+  border-radius: 10px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-4px) scale(0.98);
+  visibility: hidden;
+  z-index: 90;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    visibility 0.18s;
+}
+
+.provider-hover-card.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+  visibility: visible;
+}
+
+.provider-hover-card::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  background: var(--tooltip-bg);
+  border-left: 1px solid var(--tooltip-border);
+  border-top: 1px solid var(--tooltip-border);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.provider-hover-card strong,
+.provider-hover-card span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-hover-card strong {
+  color: var(--color-text-strong);
+  font-size: 13px;
+  font-weight: 850;
+  line-height: 1.25;
+}
+
+.provider-hover-url {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.provider-hover-visited {
+  margin-top: 3px;
+  color: #52d273;
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1.25;
+}
+
 .provider-logo {
   width: 25px;
   height: 25px;
@@ -363,12 +439,35 @@ button {
   border-radius: 9px;
   cursor: pointer;
   -webkit-app-region: no-drag;
+  opacity: 0.88;
+  transition:
+    opacity 0.18s ease,
+    color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease;
+}
+
+.icon-button svg {
+  opacity: 0.78;
+  transform: scale(0.96);
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease,
+    filter 0.18s ease;
 }
 
 .icon-button:hover,
 .icon-button.active {
   color: var(--color-text-strong);
   background: var(--bg-icon-btn-hover);
+  opacity: 1;
+}
+
+.icon-button:hover svg,
+.icon-button.active svg {
+  opacity: 1;
+  transform: scale(1.05);
 }
 
 .icon-button.soft {
@@ -385,6 +484,14 @@ button {
   color: #ffb2aa;
   background: rgba(255, 95, 82, 0.15);
   box-shadow: inset 0 0 12px rgba(255, 95, 82, 0.5);
+}
+
+.close-button:hover svg {
+  filter: drop-shadow(0 0 6px rgba(255, 95, 82, 0.48));
+}
+
+.refresh-button:hover svg {
+  transform: rotate(35deg) scale(1.05);
 }
 
 .popup-content {
@@ -543,6 +650,49 @@ button {
   overflow: auto;
   padding: 1px 6px 1px 1px;
   animation: tab-fade-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-group + .settings-group {
+  margin-top: 6px;
+}
+
+.settings-group-title {
+  margin: 0 2px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.settings-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.conditional-setting-row {
+  animation: conditional-setting-enter 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+  transform-origin: top center;
+}
+
+@keyframes conditional-setting-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @keyframes tab-fade-in {
@@ -765,23 +915,23 @@ button {
 
 .window-size-field {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
-  gap: 8px;
-  min-height: 0;
-  padding: 14px 16px;
+  grid-template-columns: 132px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 10px;
 }
 
 .window-size-field > span {
-  min-height: 0;
-  line-height: 1;
+  min-width: 0;
+  line-height: 1.2;
 }
 
 .window-size-control {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 10px;
   min-width: 0;
   width: 100%;
 }
@@ -798,9 +948,10 @@ button {
 
 .window-size-field .primary-button.compact {
   width: auto;
-  min-width: 88px;
-  min-height: 34px;
-  padding-inline: 12px;
+  min-width: 76px;
+  min-height: 30px;
+  padding-inline: 10px;
+  font-size: 13px;
 }
 
 .inline-control {
@@ -1084,7 +1235,7 @@ button {
 
 @media (max-width: 620px), (max-height: 550px) {
   .popup-toolbar {
-    grid-template-columns: minmax(0, 1fr) 34px 34px;
+    grid-template-columns: minmax(0, 1fr) repeat(var(--toolbar-action-count), 34px);
     padding-inline: 8px;
   }
 
@@ -1120,8 +1271,9 @@ button {
   }
 
   .window-size-field {
-    align-items: start;
-    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
   }
 
   .window-size-control {

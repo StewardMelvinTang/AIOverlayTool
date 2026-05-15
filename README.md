@@ -1,6 +1,6 @@
-# FloatAI Launcher
+# Float AI
 
-FloatAI Launcher is a macOS and Windows Electron app that opens a floating, always-on-top AI launcher with a global shortcut. It uses a React + TypeScript renderer, Electron IPC, `electron-store` for local settings, a menu bar/tray menu, and an Electron `webview` for AI websites.
+Float AI is a macOS and Windows Electron app that opens a floating, always-on-top AI launcher with a global shortcut. It uses a React + TypeScript renderer, Electron IPC, `electron-store` for local settings, a menu bar/tray menu, and an Electron `webview` for AI websites.
 
 ## Features
 

@@ -8,6 +8,7 @@ import {
   Keyboard,
   Moon,
   Plus,
+  RefreshCw,
   Save,
   Settings,
   Sun,
@@ -31,6 +32,12 @@ type ProviderDraft = {
   name: string;
   url: string;
   icon: string;
+};
+
+type ProviderTooltipState = {
+  providerId: string;
+  left: number;
+  visible: boolean;
 };
 
 type WebviewElement = HTMLElement & {
@@ -65,10 +72,12 @@ export default function PopupWindow() {
   const [draftIconUrl, setDraftIconUrl] = useState('');
   const [isResizingMode, setIsResizingMode] = useState(false);
   const [providerToDelete, setProviderToDelete] = useState<string | null>(null);
+  const [providerTooltip, setProviderTooltip] = useState<ProviderTooltipState | null>(null);
   const webviewRefs = useRef<Record<string, WebviewElement | null>>({});
   const webviewCleanupRefs = useRef<Record<string, (() => void) | undefined>>({});
   const providerLastUrlsRef = useRef<Record<string, string>>({});
   const unloadTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
+  const providerTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const loadedProviderIdsRef = useRef<Set<string>>(new Set());
   const selectedProviderIdRef = useRef('');
   const webviewInitialUrlsRef = useRef<Record<string, string>>({});
@@ -200,6 +209,7 @@ export default function PopupWindow() {
       setSelectedProviderId(nextSettings.defaultProviderId);
       setHotkeyDraft(nextSettings.globalHotkey);
       setHotkeyError('');
+      void markProviderVisited(nextSettings.defaultProviderId, nextSettings);
     });
 
     const removeSettingsListener = window.floatAI.onSettingsChanged((nextSettings) => {
@@ -265,6 +275,9 @@ export default function PopupWindow() {
       webviewCleanupRefs.current = {};
       for (const providerId of Object.keys(unloadTimersRef.current)) {
         clearUnloadTimer(providerId);
+      }
+      if (providerTooltipTimerRef.current) {
+        clearTimeout(providerTooltipTimerRef.current);
       }
     };
   }, []);
@@ -435,6 +448,45 @@ export default function PopupWindow() {
     return nextSettings;
   }
 
+  async function markProviderVisited(providerId: string, sourceSettings: FloatAISettings | null = settings) {
+    if (!sourceSettings || !sourceSettings.providers.some((provider) => provider.id === providerId)) {
+      return;
+    }
+
+    const visitedAt = new Date().toISOString();
+    const providers = sourceSettings.providers.map((provider) =>
+      provider.id === providerId
+        ? {
+            ...provider,
+            lastVisitedAt: visitedAt
+          }
+        : provider
+    );
+
+    setSettings((current) =>
+      current
+        ? {
+            ...current,
+            providers: current.providers.map((provider) =>
+              provider.id === providerId
+                ? {
+                    ...provider,
+                    lastVisitedAt: visitedAt
+                  }
+                : provider
+            )
+          }
+        : current
+    );
+
+    try {
+      const nextSettings = await window.floatAI.updateSettings({ providers });
+      setSettings(nextSettings);
+    } catch {
+      // Keep the optimistic timestamp locally if the app is closing during the update.
+    }
+  }
+
   async function saveHotkeyDraft() {
     if (!settings) {
       return;
@@ -484,6 +536,7 @@ export default function PopupWindow() {
     setSelectedProviderId(providerId);
     setSettingsOpen(false);
     await window.floatAI.switchProvider(providerId);
+    void markProviderVisited(providerId);
   }
 
   function navigateWebview(direction: WebviewNavigationDirection) {
@@ -500,6 +553,60 @@ export default function PopupWindow() {
     if (direction === 'forward' && webview.canGoForward()) {
       webview.goForward();
     }
+  }
+
+  function refreshActiveProvider() {
+    const webview = webviewRefs.current[selectedProviderId];
+
+    if (!webview || typeof webview.reload !== 'function') {
+      return;
+    }
+
+    rememberProviderUrl(selectedProviderId);
+    webview.reload();
+    void markProviderVisited(selectedProviderId);
+  }
+
+  function showProviderTooltip(providerId: string, target: HTMLElement) {
+    if (!settings?.popup.showProviderTooltip) {
+      return;
+    }
+
+    if (providerTooltipTimerRef.current) {
+      clearTimeout(providerTooltipTimerRef.current);
+      providerTooltipTimerRef.current = undefined;
+    }
+
+    const toolbar = target.closest('.popup-toolbar') as HTMLElement | null;
+    const targetRect = target.getBoundingClientRect();
+    const toolbarRect = toolbar?.getBoundingClientRect();
+    const toolbarLeft = toolbarRect?.left ?? 0;
+    const toolbarWidth = toolbarRect?.width ?? window.innerWidth;
+    const tooltipHalfWidth = 132;
+    const rawLeft = targetRect.left - toolbarLeft + targetRect.width / 2;
+    const left = Math.min(
+      Math.max(rawLeft, tooltipHalfWidth),
+      Math.max(tooltipHalfWidth, toolbarWidth - tooltipHalfWidth)
+    );
+
+    setProviderTooltip({
+      providerId,
+      left,
+      visible: true
+    });
+  }
+
+  function hideProviderTooltip() {
+    setProviderTooltip((current) => (current ? { ...current, visible: false } : current));
+
+    if (providerTooltipTimerRef.current) {
+      clearTimeout(providerTooltipTimerRef.current);
+    }
+
+    providerTooltipTimerRef.current = setTimeout(() => {
+      setProviderTooltip(null);
+      providerTooltipTimerRef.current = undefined;
+    }, 180);
   }
 
   function startAddProvider() {
@@ -749,10 +856,16 @@ export default function PopupWindow() {
 
   const chromeStyle = {
     '--chrome-opacity': '1',
+    '--toolbar-action-count': settings.popup.showRefreshButton ? '3' : '2',
     opacity: targetOpacity,
     transition: 'opacity 0.1s ease',
     pointerEvents: isVisible ? 'auto' : 'none'
   } as CSSProperties;
+  const tooltipProvider = providerTooltip
+    ? settings.providers.find((provider) => provider.id === providerTooltip.providerId)
+    : undefined;
+  const normalizedHotkeyDraft = normalizeAcceleratorText(hotkeyDraft, isMac);
+  const hotkeyHasChanges = Boolean(normalizedHotkeyDraft) && normalizedHotkeyDraft !== settings.globalHotkey;
 
   return (
     <div
@@ -809,8 +922,11 @@ export default function PopupWindow() {
                     .filter(Boolean)
                     .join(' ')}
                   onClick={() => handleProviderChange(provider.id)}
-                  title={provider.url}
-                  aria-label={provider.name}
+                  onMouseEnter={(event) => showProviderTooltip(provider.id, event.currentTarget)}
+                  onMouseLeave={hideProviderTooltip}
+                  onFocus={(event) => showProviderTooltip(provider.id, event.currentTarget)}
+                  onBlur={hideProviderTooltip}
+                  aria-label={`${provider.name}, ${formatProviderWebPage(provider.url)}`}
                 >
                   <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
                   <span
@@ -824,6 +940,30 @@ export default function PopupWindow() {
             })}
           </div>
         </div>
+        {settings.popup.showProviderTooltip && tooltipProvider && providerTooltip && (
+          <div
+            className={providerTooltip.visible ? 'provider-hover-card visible' : 'provider-hover-card'}
+            style={{ left: providerTooltip.left }}
+            aria-hidden="true"
+          >
+            <strong>{tooltipProvider.name}</strong>
+            <span className="provider-hover-url">{formatProviderWebPage(tooltipProvider.url)}</span>
+            {settings.popup.showProviderTooltipLastVisited && (
+              <span className="provider-hover-visited">{formatLastVisited(tooltipProvider.lastVisitedAt)}</span>
+            )}
+          </div>
+        )}
+        {settings.popup.showRefreshButton && (
+          <button
+            className="icon-button no-drag refresh-button"
+            type="button"
+            onClick={refreshActiveProvider}
+            title="Refresh page"
+            aria-label="Refresh current provider page"
+          >
+            <RefreshCw size={17} />
+          </button>
+        )}
         <button
           className={settingsOpen ? 'icon-button no-drag active' : 'icon-button no-drag'}
           type="button"
@@ -903,80 +1043,111 @@ export default function PopupWindow() {
 
             {settingsTab === 'window' && (
               <div className="drawer-section">
-                <div className="compact-field window-size-field">
-                  <span>Window Size</span>
-                  <div className="window-size-control">
-                    <span className="window-size-value">
-                      {settings.popup.width} &times; {settings.popup.height}
-                    </span>
-                    <button className="primary-button compact" type="button" onClick={() => setIsResizingMode(true)}>
-                      <Edit3 size={16} />
-                      Resize
-                    </button>
+                <section className="settings-group">
+                  <h2 className="settings-group-title">Appearance</h2>
+                  <div className="settings-group-body">
+                    <div className="compact-field window-size-field">
+                      <span>Window size</span>
+                      <div className="window-size-control">
+                        <span className="window-size-value">
+                          {settings.popup.width} &times; {settings.popup.height}
+                        </span>
+                        <button className="primary-button compact" type="button" onClick={() => setIsResizingMode(true)}>
+                          <Edit3 size={16} />
+                          Resize
+                        </button>
+                      </div>
+                    </div>
+                    <CompactSliderRow
+                      label="Transparency"
+                      value={Math.round(settings.popup.opacity * 100)}
+                      min={60}
+                      max={100}
+                      suffix="%"
+                      onChange={(opacity) => patchPopup({ opacity: opacity / 100 })}
+                    />
+                    <div className="theme-segmented-row">
+                      <span>Theme</span>
+                      <div className="segmented-control">
+                        <div className={`segmented-slider ${settings.darkMode ? 'dark-active' : 'light-active'}`} />
+                        <button
+                          type="button"
+                          className={`segmented-btn ${!settings.darkMode ? 'active' : ''}`}
+                          onClick={() => persist({ darkMode: false })}
+                        >
+                          <Sun size={14} className="segmented-icon" />
+                          <span>Light</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`segmented-btn ${settings.darkMode ? 'active' : ''}`}
+                          onClick={() => persist({ darkMode: true })}
+                        >
+                          <Moon size={14} className="segmented-icon" />
+                          <span>Dark</span>
+                        </button>
+                      </div>
+                    </div>
+                    <CompactToggleRow
+                      label="Show tooltip"
+                      checked={settings.popup.showProviderTooltip}
+                      onChange={(showProviderTooltip) => patchPopup({ showProviderTooltip })}
+                    />
+                    {settings.popup.showProviderTooltip && (
+                      <div className="conditional-setting-row">
+                        <CompactToggleRow
+                          label="Show last visited"
+                          checked={settings.popup.showProviderTooltipLastVisited}
+                          onChange={(showProviderTooltipLastVisited) =>
+                            patchPopup({ showProviderTooltipLastVisited })
+                          }
+                        />
+                      </div>
+                    )}
                   </div>
-                </div>
-                <CompactSliderRow
-                  label="Transparency"
-                  value={Math.round(settings.popup.opacity * 100)}
-                  min={60}
-                  max={100}
-                  suffix="%"
-                  onChange={(opacity) => patchPopup({ opacity: opacity / 100 })}
-                />
-                <div className="theme-segmented-row">
-                  <span>Theme</span>
-                  <div className="segmented-control">
-                    <div className={`segmented-slider ${settings.darkMode ? 'dark-active' : 'light-active'}`} />
-                    <button
-                      type="button"
-                      className={`segmented-btn ${!settings.darkMode ? 'active' : ''}`}
-                      onClick={() => persist({ darkMode: false })}
-                    >
-                      <Sun size={14} className="segmented-icon" />
-                      <span>Light</span>
-                    </button>
-                    <button
-                      type="button"
-                      className={`segmented-btn ${settings.darkMode ? 'active' : ''}`}
-                      onClick={() => persist({ darkMode: true })}
-                    >
-                      <Moon size={14} className="segmented-icon" />
-                      <span>Dark</span>
-                    </button>
+                </section>
+                <section className="settings-group">
+                  <h2 className="settings-group-title">System</h2>
+                  <div className="settings-group-body">
+                    <CompactToggleRow
+                      label="Always on top"
+                      checked={settings.popup.alwaysOnTop}
+                      onChange={(alwaysOnTop) => patchPopup({ alwaysOnTop })}
+                    />
+                    <CompactToggleRow
+                      label="Remember position"
+                      checked={settings.popup.rememberPosition}
+                      onChange={(rememberPosition) => patchPopup({ rememberPosition })}
+                    />
+                    <CompactToggleRow
+                      label="Hide on defocus"
+                      checked={settings.popup.hideOnBlur}
+                      onChange={(hideOnBlur) => patchPopup({ hideOnBlur })}
+                      tooltip="Automatically hides FloatAI when you click outside the window."
+                    />
+                    <CompactToggleRow
+                      label="Show refresh button"
+                      checked={settings.popup.showRefreshButton}
+                      onChange={(showRefreshButton) => patchPopup({ showRefreshButton })}
+                    />
+                    <CompactToggleRow
+                      label={isMac ? 'Menu bar icon' : 'Tray icon'}
+                      checked={settings.showTrayIcon}
+                      onChange={(showTrayIcon) => persist({ showTrayIcon })}
+                    />
+                    <CompactToggleRow
+                      label={isMac ? 'Launch at login' : 'Launch at startup'}
+                      checked={settings.launchAtStartup}
+                      onChange={(launchAtStartup) => persist({ launchAtStartup })}
+                    />
+                    <CompactToggleRow
+                      label="Privacy Capture Protection"
+                      checked={settings.privacy?.captureProtection ?? false}
+                      onChange={(captureProtection) => persist({ privacy: { captureProtection } })}
+                      tooltip="Hides FloatAI from screenshots and screen sharing where supported. Support varies by operating system and capture app."
+                    />
                   </div>
-                </div>
-                <CompactToggleRow
-                  label="Always on top"
-                  checked={settings.popup.alwaysOnTop}
-                  onChange={(alwaysOnTop) => patchPopup({ alwaysOnTop })}
-                />
-                <CompactToggleRow
-                  label="Remember position"
-                  checked={settings.popup.rememberPosition}
-                  onChange={(rememberPosition) => patchPopup({ rememberPosition })}
-                />
-                <CompactToggleRow
-                  label="Hide on defocus"
-                  checked={settings.popup.hideOnBlur}
-                  onChange={(hideOnBlur) => patchPopup({ hideOnBlur })}
-                  tooltip="Automatically hides FloatAI when you click outside the window."
-                />
-                <CompactToggleRow
-                  label={isMac ? 'Menu bar icon' : 'Tray icon'}
-                  checked={settings.showTrayIcon}
-                  onChange={(showTrayIcon) => persist({ showTrayIcon })}
-                />
-                <CompactToggleRow
-                  label="Startup"
-                  checked={settings.launchAtStartup}
-                  onChange={(launchAtStartup) => persist({ launchAtStartup })}
-                />
-                <CompactToggleRow
-                  label="Privacy Capture Protection"
-                  checked={settings.privacy?.captureProtection ?? false}
-                  onChange={(captureProtection) => persist({ privacy: { captureProtection } })}
-                  tooltip="Hides FloatAI from screenshots and screen sharing where supported (FULLY UNDETECTABLE). Works best on Windows 10 2004+ and Windows 11. Support may vary by app and OS."
-                />
+                </section>
               </div>
             )}
 
@@ -1060,7 +1231,7 @@ export default function PopupWindow() {
                         className="primary-button compact"
                         type="button"
                         onClick={saveHotkeyDraft}
-                        disabled={hotkeyListening}
+                        disabled={hotkeyListening || !hotkeyHasChanges}
                       >
                         <Save size={16} />
                         Apply
@@ -1070,7 +1241,7 @@ export default function PopupWindow() {
                 </div>
                 {hotkeyError && <div className="shortcut-error">{hotkeyError}</div>}
                 <CompactToggleRow
-                  label="Ctrl +/- to zoom"
+                  label={isMac ? 'Cmd +/- to zoom' : 'Ctrl +/- to zoom'}
                   checked={settings.enableZoomShortcuts}
                   onChange={(enableZoomShortcuts) => persist({ enableZoomShortcuts })}
                 />
@@ -1384,6 +1555,53 @@ function validateAcceleratorText(value: string): string {
   }
 
   return '';
+}
+
+function formatProviderWebPage(url: string): string {
+  try {
+    const parsedUrl = new URL(url);
+    const path = parsedUrl.pathname === '/' ? '' : parsedUrl.pathname.replace(/\/$/, '');
+    return `${parsedUrl.hostname}${path}`;
+  } catch {
+    return url;
+  }
+}
+
+function formatLastVisited(lastVisitedAt?: string): string {
+  if (!lastVisitedAt) {
+    return 'never visited';
+  }
+
+  const visitedTime = new Date(lastVisitedAt).getTime();
+
+  if (!Number.isFinite(visitedTime)) {
+    return 'never visited';
+  }
+
+  const elapsedMs = Math.max(0, Date.now() - visitedTime);
+  const minuteMs = 60 * 1000;
+  const hourMs = 60 * minuteMs;
+  const dayMs = 24 * hourMs;
+
+  if (elapsedMs < minuteMs) {
+    return 'last visited just now';
+  }
+
+  if (elapsedMs < hourMs) {
+    return `last visited ${Math.floor(elapsedMs / minuteMs)}m ago`;
+  }
+
+  if (elapsedMs < dayMs) {
+    return `last visited ${Math.floor(elapsedMs / hourMs)}h ago`;
+  }
+
+  const days = Math.floor(elapsedMs / dayMs);
+
+  if (days >= 30) {
+    return 'last visited 30days+';
+  }
+
+  return `last visited ${days} ${days === 1 ? 'day' : 'days'} ago`;
 }
 
 function ProviderLogo({ iconUrl, provider }: { iconUrl?: string; provider: Provider }) {

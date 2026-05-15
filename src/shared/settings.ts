@@ -3,6 +3,7 @@ export type Provider = {
   name: string;
   url: string;
   icon: string;
+  lastVisitedAt?: string;
 };
 
 export type PopupSettings = {
@@ -16,6 +17,9 @@ export type PopupSettings = {
   rememberPosition: boolean;
   hideOnBlur: boolean;
   resizableInPopup: boolean;
+  showRefreshButton: boolean;
+  showProviderTooltip: boolean;
+  showProviderTooltipLastVisited: boolean;
 };
 
 export type ClipboardSettings = {
@@ -100,7 +104,10 @@ export const defaultSettings: FloatAISettings = {
     alwaysOnTop: true,
     rememberPosition: true,
     hideOnBlur: false,
-    resizableInPopup: false
+    resizableInPopup: false,
+    showRefreshButton: false,
+    showProviderTooltip: true,
+    showProviderTooltipLastVisited: true
   },
   providers: builtInProviders,
   clipboard: {
@@ -154,6 +161,7 @@ function isProvider(value: unknown): value is Provider {
     typeof provider.name === 'string' &&
     typeof provider.url === 'string' &&
     typeof provider.icon === 'string' &&
+    (provider.lastVisitedAt === undefined || typeof provider.lastVisitedAt === 'string') &&
     isHttpUrl(provider.url)
   );
 }
@@ -193,7 +201,19 @@ export function normalizeSettings(value: unknown): FloatAISettings {
           : defaultSettings.popup.rememberPosition,
       hideOnBlur:
         typeof input.popup?.hideOnBlur === 'boolean' ? input.popup.hideOnBlur : defaultSettings.popup.hideOnBlur,
-      resizableInPopup: false
+      resizableInPopup: false,
+      showRefreshButton:
+        typeof input.popup?.showRefreshButton === 'boolean'
+          ? input.popup.showRefreshButton
+          : defaultSettings.popup.showRefreshButton,
+      showProviderTooltip:
+        typeof input.popup?.showProviderTooltip === 'boolean'
+          ? input.popup.showProviderTooltip
+          : defaultSettings.popup.showProviderTooltip,
+      showProviderTooltipLastVisited:
+        typeof input.popup?.showProviderTooltipLastVisited === 'boolean'
+          ? input.popup.showProviderTooltipLastVisited
+          : defaultSettings.popup.showProviderTooltipLastVisited
     },
     providers,
     clipboard: {

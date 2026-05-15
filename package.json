@@ -1,9 +1,9 @@
 {
-  "name": "floatai-launcher",
+  "name": "float-ai",
   "version": "0.1.0",
-  "description": "A universal floating AI popup launcher for macOS and Windows.",
+  "description": "Float AI",
   "main": "dist-electron/main.js",
-  "author": "FloatAI Launcher",
+  "author": "Float AI",
   "license": "MIT",
   "scripts": {
     "dev": "npm run build:main && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
@@ -39,7 +39,7 @@
   },
   "build": {
     "appId": "com.floatai.launcher",
-    "productName": "FloatAI Launcher",
+    "productName": "Float AI",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -55,6 +55,7 @@
     "asar": true,
     "win": {
       "icon": "icon_256.png",
+      "executableName": "Float AI",
       "target": [
         "nsis",
         "portable"

@@ -28,6 +28,9 @@ import type { ProviderIconPickResult, PopupPosition, PopupSize } from './shared/
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === 'darwin';
+const isWindows = process.platform === 'win32';
+const appDisplayName = 'Float AI';
+const appUserModelId = 'com.floatai.launcher';
 const macDefaultHotkey = 'Option+Space';
 const store = new Store<FloatAISettings>({
   name: 'float-ai-launcher',
@@ -60,7 +63,12 @@ if (!gotLock) {
   app.quit();
 }
 
-app.setName('FloatAI Launcher');
+process.title = appDisplayName;
+app.setName(appDisplayName);
+
+if (isWindows) {
+  app.setAppUserModelId(appUserModelId);
+}
 
 function applyPlatformSettings(nextSettings: FloatAISettings): FloatAISettings {
   if (!isMac) {
@@ -210,7 +218,7 @@ function createPopupWindow(): BrowserWindow {
 
   popupWindow = new BrowserWindow({
     ...calculatePopupBounds(),
-    title: 'FloatAI Launcher',
+    title: appDisplayName,
     icon: iconImage,
     show: false,
     frame: false,
@@ -669,7 +677,7 @@ function createTrayMenu(): Menu {
     },
     { type: 'separator' },
     {
-      label: isMac ? 'Quit FloatAI Completely' : 'Quit',
+      label: isMac ? `Quit ${appDisplayName} Completely` : 'Quit',
       click: () => {
         isQuitting = true;
         app.quit();
@@ -684,7 +692,7 @@ function updateTrayAppearance(): void {
   }
 
   tray.setImage(createTrayImage());
-  tray.setToolTip('FloatAI Launcher');
+  tray.setToolTip(appDisplayName);
 
   if (isMac) {
     tray.setTitle('');
@@ -725,7 +733,7 @@ function setupApplicationMenu(): void {
           { role: 'unhide' },
           { type: 'separator' },
           {
-            label: 'Quit FloatAI Completely',
+            label: `Quit ${appDisplayName} Completely`,
             accelerator: 'Command+Q',
             click: () => {
               isQuitting = true;
@@ -735,7 +743,7 @@ function setupApplicationMenu(): void {
         ]
       },
       {
-        label: 'FloatAI',
+        label: appDisplayName,
         submenu: [
           {
             label: 'Open Popup',
