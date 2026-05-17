@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Edit3,
+  GripVertical,
   HelpCircle,
   ImagePlus,
   Keyboard,
@@ -40,6 +41,26 @@ type ProviderTooltipState = {
   visible: boolean;
 };
 
+type ProviderDragState = {
+  activeId: string;
+  activeIndex: number;
+  targetIndex: number;
+  offsetY: number;
+  rowPitch: number;
+};
+
+type ProviderDragSession = ProviderDragState & {
+  pointerId: number;
+  startY: number;
+  providers: Provider[];
+};
+
+type ProviderDragListeners = {
+  move: (event: PointerEvent) => void;
+  end: (event: PointerEvent) => void;
+  cancel: (event: PointerEvent) => void;
+};
+
 type WebviewElement = HTMLElement & {
   canGoBack: () => boolean;
   canGoForward: () => boolean;
@@ -73,11 +94,15 @@ export default function PopupWindow() {
   const [isResizingMode, setIsResizingMode] = useState(false);
   const [providerToDelete, setProviderToDelete] = useState<string | null>(null);
   const [providerTooltip, setProviderTooltip] = useState<ProviderTooltipState | null>(null);
+  const [providerDrag, setProviderDrag] = useState<ProviderDragState | null>(null);
   const webviewRefs = useRef<Record<string, WebviewElement | null>>({});
   const webviewCleanupRefs = useRef<Record<string, (() => void) | undefined>>({});
   const providerLastUrlsRef = useRef<Record<string, string>>({});
   const unloadTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
   const providerTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const providerDragSessionRef = useRef<ProviderDragSession | null>(null);
+  const providerDragListenersRef = useRef<ProviderDragListeners | null>(null);
+  const providerDragFrameRef = useRef<number | undefined>(undefined);
   const loadedProviderIdsRef = useRef<Set<string>>(new Set());
   const selectedProviderIdRef = useRef('');
   const webviewInitialUrlsRef = useRef<Record<string, string>>({});
@@ -279,6 +304,9 @@ export default function PopupWindow() {
       if (providerTooltipTimerRef.current) {
         clearTimeout(providerTooltipTimerRef.current);
       }
+      removeProviderDragListeners();
+      cancelProviderDragFrame();
+      providerDragSessionRef.current = null;
     };
   }, []);
 
@@ -743,6 +771,215 @@ export default function PopupWindow() {
     setProviderFormOpen(false);
   }
 
+  function removeProviderDragListeners() {
+    const listeners = providerDragListenersRef.current;
+
+    if (!listeners) {
+      return;
+    }
+
+    window.removeEventListener('pointermove', listeners.move);
+    window.removeEventListener('pointerup', listeners.end);
+    window.removeEventListener('pointercancel', listeners.cancel);
+    providerDragListenersRef.current = null;
+  }
+
+  function cancelProviderDragFrame() {
+    if (providerDragFrameRef.current === undefined) {
+      return;
+    }
+
+    window.cancelAnimationFrame(providerDragFrameRef.current);
+    providerDragFrameRef.current = undefined;
+  }
+
+  function queueProviderDragRender() {
+    if (providerDragFrameRef.current !== undefined) {
+      return;
+    }
+
+    providerDragFrameRef.current = window.requestAnimationFrame(() => {
+      providerDragFrameRef.current = undefined;
+      const session = providerDragSessionRef.current;
+
+      if (!session) {
+        return;
+      }
+
+      setProviderDrag({
+        activeId: session.activeId,
+        activeIndex: session.activeIndex,
+        targetIndex: session.targetIndex,
+        offsetY: session.offsetY,
+        rowPitch: session.rowPitch
+      });
+    });
+  }
+
+  function startProviderReorder(providerId: string, event: React.PointerEvent<HTMLButtonElement>) {
+    if (!settings || settings.providers.length <= 1) {
+      return;
+    }
+
+    const activeIndex = settings.providers.findIndex((provider) => provider.id === providerId);
+
+    if (activeIndex === -1) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    removeProviderDragListeners();
+    cancelProviderDragFrame();
+
+    const activeRow = event.currentTarget.closest<HTMLElement>('.compact-provider-row');
+    const list = event.currentTarget.closest<HTMLElement>('.compact-provider-list');
+    const rows = list ? Array.from(list.querySelectorAll<HTMLElement>('.compact-provider-row')) : [];
+    const activeRect = activeRow?.getBoundingClientRect();
+    const previousRect = rows[activeIndex - 1]?.getBoundingClientRect();
+    const nextRect = rows[activeIndex + 1]?.getBoundingClientRect();
+    const measuredPitch =
+      activeRect && nextRect
+        ? nextRect.top - activeRect.top
+        : activeRect && previousRect
+          ? activeRect.top - previousRect.top
+          : undefined;
+    const fallbackPitch = (activeRect?.height ?? 68) + 10;
+    const rowPitch = Math.max(activeRect?.height ?? 68, measuredPitch ?? fallbackPitch);
+
+    const session: ProviderDragSession = {
+      activeId: providerId,
+      activeIndex,
+      targetIndex: activeIndex,
+      offsetY: 0,
+      rowPitch,
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      providers: settings.providers
+    };
+
+    providerDragSessionRef.current = session;
+    setProviderDrag({
+      activeId: session.activeId,
+      activeIndex: session.activeIndex,
+      targetIndex: session.targetIndex,
+      offsetY: session.offsetY,
+      rowPitch: session.rowPitch
+    });
+
+    const listeners: ProviderDragListeners = {
+      move: (pointerEvent) => handleProviderDragMove(pointerEvent),
+      end: (pointerEvent) => {
+        void finishProviderReorder(pointerEvent);
+      },
+      cancel: (pointerEvent) => cancelProviderReorder(pointerEvent)
+    };
+
+    providerDragListenersRef.current = listeners;
+    window.addEventListener('pointermove', listeners.move, { passive: false });
+    window.addEventListener('pointerup', listeners.end);
+    window.addEventListener('pointercancel', listeners.cancel);
+  }
+
+  function handleProviderDragMove(event: PointerEvent) {
+    const session = providerDragSessionRef.current;
+
+    if (!session || event.pointerId !== session.pointerId) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const offsetY = event.clientY - session.startY;
+    const rawTargetIndex = session.activeIndex + Math.round(offsetY / session.rowPitch);
+    const targetIndex = clampIndex(rawTargetIndex, 0, session.providers.length - 1);
+
+    session.offsetY = offsetY;
+    session.targetIndex = targetIndex;
+    queueProviderDragRender();
+  }
+
+  async function finishProviderReorder(event?: PointerEvent) {
+    const session = providerDragSessionRef.current;
+
+    if (!session || (event && event.pointerId !== session.pointerId)) {
+      return;
+    }
+
+    removeProviderDragListeners();
+    cancelProviderDragFrame();
+    providerDragSessionRef.current = null;
+
+    if (session.targetIndex === session.activeIndex) {
+      setProviderDrag(null);
+      return;
+    }
+
+    const nextProviders = moveProvider(session.providers, session.activeIndex, session.targetIndex);
+    setSettings((current) => (current ? { ...current, providers: nextProviders } : current));
+    setProviderDrag(null);
+
+    try {
+      await persist({ providers: nextProviders });
+      setProviderError('');
+    } catch {
+      setSettings((current) => (current ? { ...current, providers: session.providers } : current));
+      setProviderError('Could not save provider order.');
+    }
+  }
+
+  function cancelProviderReorder(event?: PointerEvent) {
+    const session = providerDragSessionRef.current;
+
+    if (!session || (event && event.pointerId !== session.pointerId)) {
+      return;
+    }
+
+    removeProviderDragListeners();
+    cancelProviderDragFrame();
+    providerDragSessionRef.current = null;
+    setProviderDrag(null);
+  }
+
+  function getProviderRowClassName(providerId: string, index: number): string {
+    const classNames = ['compact-provider-row'];
+
+    if (providerDrag) {
+      classNames.push('reordering-row');
+
+      if (providerDrag.activeId === providerId) {
+        classNames.push('dragging-provider');
+      } else if (isProviderRowShifted(index, providerDrag)) {
+        classNames.push('reorder-shift');
+      }
+    }
+
+    return classNames.join(' ');
+  }
+
+  function getProviderRowDragStyle(providerId: string, index: number): CSSProperties | undefined {
+    if (!providerDrag) {
+      return undefined;
+    }
+
+    if (providerDrag.activeId === providerId) {
+      return {
+        transform: `translate3d(0, ${providerDrag.offsetY}px, 0) scale(1.015)`
+      };
+    }
+
+    if (!isProviderRowShifted(index, providerDrag)) {
+      return undefined;
+    }
+
+    const direction = providerDrag.targetIndex > providerDrag.activeIndex ? -1 : 1;
+
+    return {
+      transform: `translate3d(0, ${direction * providerDrag.rowPitch}px, 0)`
+    };
+  }
+
   function setWebviewRef(providerId: string, element: WebviewElement | null) {
     const existingWebview = webviewRefs.current[providerId];
 
@@ -1153,9 +1390,28 @@ export default function PopupWindow() {
 
             {settingsTab === 'providers' && (
               <div className="drawer-section provider-drawer">
-                <div className="compact-provider-list">
-                  {settings.providers.map((provider) => (
-                    <div className="compact-provider-row" key={provider.id}>
+                <div className={providerDrag ? 'compact-provider-list reordering' : 'compact-provider-list'}>
+                  {settings.providers.map((provider, index) => (
+                    <div
+                      className={getProviderRowClassName(provider.id, index)}
+                      data-provider-row-id={provider.id}
+                      key={provider.id}
+                      style={getProviderRowDragStyle(provider.id, index)}
+                    >
+                      <button
+                        type="button"
+                        className={
+                          providerDrag?.activeId === provider.id
+                            ? 'provider-reorder-handle dragging'
+                            : 'provider-reorder-handle'
+                        }
+                        onPointerDown={(event) => startProviderReorder(provider.id, event)}
+                        disabled={settings.providers.length <= 1}
+                        title="Drag to reorder"
+                        aria-label={`Drag ${provider.name} to reorder`}
+                      >
+                        <GripVertical size={16} />
+                      </button>
                       <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
                       <button
                         type="button"
@@ -1181,6 +1437,11 @@ export default function PopupWindow() {
                     </div>
                   ))}
                 </div>
+                {providerError && !providerFormOpen && (
+                  <div className="provider-inline-error" role="status">
+                    {providerError}
+                  </div>
+                )}
                 <div style={{ marginTop: 'auto' }}>
                   <CompactToggleRow
                     label="Compact bar"
@@ -1749,4 +2010,31 @@ function createUniqueProviderId(name: string, providers: Provider[]): string {
   }
 
   return nextId;
+}
+
+function clampIndex(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function moveProvider(providers: Provider[], fromIndex: number, toIndex: number): Provider[] {
+  if (fromIndex === toIndex) {
+    return providers;
+  }
+
+  const nextProviders = [...providers];
+  const [provider] = nextProviders.splice(fromIndex, 1);
+  nextProviders.splice(toIndex, 0, provider);
+  return nextProviders;
+}
+
+function isProviderRowShifted(index: number, drag: ProviderDragState): boolean {
+  if (drag.targetIndex > drag.activeIndex) {
+    return index > drag.activeIndex && index <= drag.targetIndex;
+  }
+
+  if (drag.targetIndex < drag.activeIndex) {
+    return index >= drag.targetIndex && index < drag.activeIndex;
+  }
+
+  return false;
 }

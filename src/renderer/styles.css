@@ -1029,13 +1029,18 @@ button {
   padding-right: 6px;
 }
 
+.compact-provider-list.reordering {
+  cursor: grabbing;
+  touch-action: none;
+}
+
 .compact-provider-row {
   min-height: 68px;
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr) 24px 32px 32px;
+  grid-template-columns: 28px 42px minmax(0, 1fr) 24px 32px 32px;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: 10px;
+  padding: 12px 14px 12px 10px;
   border: 1px solid var(--border-provider-row);
   border-radius: 12px;
   background: var(--bg-provider-row);
@@ -1049,11 +1054,78 @@ button {
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
 }
 
+.compact-provider-row.reordering-row {
+  will-change: transform;
+}
+
+.compact-provider-row.reorder-shift {
+  transition:
+    transform 0.18s cubic-bezier(0.16, 1, 0.3, 1),
+    background 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.compact-provider-row.dragging-provider {
+  position: relative;
+  z-index: 3;
+  cursor: grabbing;
+  border-color: rgba(82, 210, 115, 0.56);
+  background: rgba(82, 210, 115, 0.1);
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.38);
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
 .compact-provider-row .provider-logo {
   width: 38px;
   height: 38px;
   flex-basis: 38px;
   font-size: 13px;
+}
+
+.provider-reorder-handle {
+  width: 28px;
+  height: 38px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--color-text-muted);
+  background: transparent;
+  border-radius: 8px;
+  cursor: grab;
+  opacity: 0.7;
+  touch-action: none;
+  transition:
+    opacity 0.18s ease,
+    color 0.18s ease,
+    background 0.18s ease,
+    transform 0.18s ease;
+}
+
+.provider-reorder-handle:hover,
+.provider-reorder-handle.dragging {
+  color: #52d273;
+  background: var(--bg-icon-btn-hover);
+  opacity: 1;
+}
+
+.provider-reorder-handle.dragging {
+  cursor: grabbing;
+  transform: scale(1.03);
+}
+
+.provider-reorder-handle:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.provider-inline-error {
+  color: #ffb2aa;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 0 10px;
 }
 
 .provider-name-button {
