@@ -48,6 +48,7 @@ export type FloatAISettings = {
   privacy: PrivacySettings;
   performance: PerformanceSettings;
   enableZoomShortcuts: boolean;
+  enableProviderShortcuts: boolean;
   darkMode: boolean;
   compactProviderBar: boolean;
 };
@@ -123,6 +124,7 @@ export const defaultSettings: FloatAISettings = {
     memorySaverUnloadMinutes: 2
   },
   enableZoomShortcuts: false,
+  enableProviderShortcuts: false,
   darkMode: true,
   compactProviderBar: false
 };
@@ -258,6 +260,10 @@ export function normalizeSettings(value: unknown): FloatAISettings {
       typeof input.enableZoomShortcuts === 'boolean'
         ? input.enableZoomShortcuts
         : defaultSettings.enableZoomShortcuts,
+    enableProviderShortcuts:
+      typeof input.enableProviderShortcuts === 'boolean'
+        ? input.enableProviderShortcuts
+        : defaultSettings.enableProviderShortcuts,
     darkMode:
       typeof input.darkMode === 'boolean'
         ? input.darkMode

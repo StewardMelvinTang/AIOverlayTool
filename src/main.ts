@@ -47,11 +47,19 @@ let isPopupRendererReady = false;
 let isQuitting = false;
 let isHiding = false;
 let isShortcutCaptureActive = false;
+let popupTopGuardTimer: NodeJS.Timeout | undefined;
+let popupTopReassertTimers: NodeJS.Timeout[] = [];
 
 
 type PopupBoundsOptions = {
   anchorToCursor?: boolean;
 };
+
+type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[1]>;
+
+const popupAlwaysOnTopLevel: AlwaysOnTopLevel = isWindows ? 'screen-saver' : 'floating';
+const popupTopGuardIntervalMs = 900;
+const popupTopReassertDelaysMs = [0, 80, 240];
 
 if (!settings.performance.hardwareAcceleration) {
   app.disableHardwareAcceleration();
@@ -239,11 +247,32 @@ function createPopupWindow(): BrowserWindow {
     }
   });
 
-  popupWindow.setAlwaysOnTop(settings.popup.alwaysOnTop, 'floating');
+  applyPopupTopMost({ moveToTop: true });
 
   popupWindow.on('blur', () => {
     if (!isShortcutCaptureActive && settings.popup.hideOnBlur) {
       hidePopup();
+      return;
+    }
+
+    schedulePopupTopMostReassert();
+  });
+
+  popupWindow.on('focus', () => {
+    schedulePopupTopMostReassert();
+  });
+
+  popupWindow.on('show', () => {
+    schedulePopupTopMostReassert();
+  });
+
+  popupWindow.on('restore', () => {
+    schedulePopupTopMostReassert();
+  });
+
+  popupWindow.on('always-on-top-changed', (_event, isAlwaysOnTop) => {
+    if (!isAlwaysOnTop && settings.popup.alwaysOnTop) {
+      schedulePopupTopMostReassert();
     }
   });
 
@@ -271,6 +300,7 @@ function createPopupWindow(): BrowserWindow {
   });
 
   popupWindow.on('closed', () => {
+    stopPopupTopGuard();
     setShortcutCaptureActive(false);
     popupWindow = null;
     isPopupRendererReady = false;
@@ -299,6 +329,12 @@ function createPopupWindow(): BrowserWindow {
 
   popupWindow.webContents.on('context-menu', (event) => {
     event.preventDefault();
+  });
+
+  popupWindow.webContents.on('before-input-event', (event, input) => {
+    if (switchProviderFromShortcutInput(input)) {
+      event.preventDefault();
+    }
   });
 
   loadRenderer(popupWindow, 'popup');
@@ -332,6 +368,7 @@ function showPopup(options: PopupBoundsOptions = {}): void {
 
   isHiding = false;
   window.show();
+  schedulePopupTopMostReassert();
   window.focus();
   syncTray();
 
@@ -353,6 +390,7 @@ function hidePopup(): void {
     if (popupWindow && !popupWindow.isDestroyed() && isHiding) {
       popupWindow.hide();
       isHiding = false;
+      stopPopupTopGuard();
       syncTray();
     }
   }, 120);
@@ -377,6 +415,7 @@ function openIntegratedSettings(): void {
 
   isHiding = false;
   window.show();
+  schedulePopupTopMostReassert();
   window.focus();
   syncTray();
 
@@ -391,9 +430,90 @@ function applyPopupSettings(options: PopupBoundsOptions = {}, skipOpacity = fals
   }
 
   popupWindow.setResizable(false);
-  popupWindow.setAlwaysOnTop(settings.popup.alwaysOnTop, 'floating');
+  applyPopupTopMost({ moveToTop: popupWindow.isVisible() });
   popupWindow.setContentProtection(settings.privacy.captureProtection);
   popupWindow.setBounds(calculatePopupBounds(options), false);
+}
+
+function applyPopupTopMost(options: { moveToTop?: boolean } = {}): void {
+  const window = popupWindow;
+
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  if (!settings.popup.alwaysOnTop) {
+    stopPopupTopGuard();
+    window.setAlwaysOnTop(false);
+    return;
+  }
+
+  window.setAlwaysOnTop(true, popupAlwaysOnTopLevel);
+
+  if (options.moveToTop && window.isVisible() && !isHiding) {
+    window.moveTop();
+  }
+}
+
+function schedulePopupTopMostReassert(): void {
+  clearPopupTopReassertTimers();
+
+  if (!shouldKeepPopupOnTop()) {
+    return;
+  }
+
+  for (const delay of popupTopReassertDelaysMs) {
+    const timer = setTimeout(() => {
+      if (shouldKeepPopupOnTop()) {
+        applyPopupTopMost({ moveToTop: true });
+      }
+    }, delay);
+    popupTopReassertTimers.push(timer);
+  }
+
+  startPopupTopGuard();
+}
+
+function shouldKeepPopupOnTop(): boolean {
+  return Boolean(
+    popupWindow &&
+      !popupWindow.isDestroyed() &&
+      popupWindow.isVisible() &&
+      !isHiding &&
+      settings.popup.alwaysOnTop
+  );
+}
+
+function startPopupTopGuard(): void {
+  if (popupTopGuardTimer || !shouldKeepPopupOnTop()) {
+    return;
+  }
+
+  popupTopGuardTimer = setInterval(() => {
+    if (!shouldKeepPopupOnTop()) {
+      stopPopupTopGuard();
+      return;
+    }
+
+    applyPopupTopMost({ moveToTop: true });
+  }, popupTopGuardIntervalMs);
+}
+
+function stopPopupTopGuard(): void {
+  if (popupTopGuardTimer) {
+    clearInterval(popupTopGuardTimer);
+    popupTopGuardTimer = undefined;
+  }
+
+  clearPopupTopReassertTimers();
+}
+
+function clearPopupTopReassertTimers(): void {
+  for (const timer of popupTopReassertTimers) {
+    clearTimeout(timer);
+  }
+
+  popupTopReassertTimers = [];
 }
 
 
@@ -481,6 +601,45 @@ function switchProvider(providerId: string): Provider {
   currentProviderId = provider.id;
   broadcastProvider();
   return provider;
+}
+
+function switchProviderFromShortcutInput(input: Electron.Input): boolean {
+  if (
+    !settings.enableProviderShortcuts ||
+    input.type !== 'keyDown' ||
+    input.isAutoRepeat ||
+    input.isComposing ||
+    !input.alt ||
+    input.control ||
+    input.meta ||
+    input.shift
+  ) {
+    return false;
+  }
+
+  const providerIndex = providerIndexFromShortcutInput(input);
+
+  if (providerIndex === null || providerIndex >= Math.min(settings.providers.length, 9)) {
+    return false;
+  }
+
+  switchProvider(settings.providers[providerIndex].id);
+  schedulePopupTopMostReassert();
+  return true;
+}
+
+function providerIndexFromShortcutInput(input: Electron.Input): number | null {
+  const digitByCode = input.code.match(/^(?:Digit|Numpad)([1-9])$/);
+
+  if (digitByCode) {
+    return Number(digitByCode[1]) - 1;
+  }
+
+  if (/^[1-9]$/.test(input.key)) {
+    return Number(input.key) - 1;
+  }
+
+  return null;
 }
 
 async function pickProviderIcon(): Promise<ProviderIconPickResult | null> {
@@ -859,6 +1018,11 @@ app.on('web-contents-created', (_event, contents) => {
     });
 
     contents.on('before-input-event', (event, input) => {
+      if (switchProviderFromShortcutInput(input)) {
+        event.preventDefault();
+        return;
+      }
+
       if (!settings.enableZoomShortcuts || input.type !== 'keyDown') return;
 
       const isZoomIn = (input.control || input.meta) && (input.key === '=' || input.key === '+');

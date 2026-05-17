@@ -1506,6 +1506,13 @@ export default function PopupWindow() {
                   checked={settings.enableZoomShortcuts}
                   onChange={(enableZoomShortcuts) => persist({ enableZoomShortcuts })}
                 />
+                <CompactToggleRow
+                  label={isMac ? 'Option 1-9 providers' : 'Alt 1-9 providers'}
+                  checked={settings.enableProviderShortcuts}
+                  onChange={(enableProviderShortcuts) => persist({ enableProviderShortcuts })}
+                  tooltip="Switch to the first nine providers while Float AI has keyboard focus. Provider 10 and later are ignored."
+                  tooltipPlacement="bottom"
+                />
               </div>
             )}
 
