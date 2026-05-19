@@ -125,13 +125,15 @@ export default function PopupWindow() {
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
 
-    // If there is any active horizontal scroll wheel or trackpad delta,
-    // let the browser handle it completely natively and smoothly.
     if (Math.abs(e.deltaX) > 0) {
+      e.preventDefault();
+      container.scrollTo({
+        left: container.scrollLeft + e.deltaX,
+        behavior: 'auto'
+      });
       return;
     }
 
-    // Redirect vertical scrollwheel actions to smooth horizontal scrolling.
     if (e.deltaY !== 0) {
       e.preventDefault();
       container.scrollTo({
