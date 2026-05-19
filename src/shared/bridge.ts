@@ -27,6 +27,7 @@ export type FloatAIBridge = {
   setShortcutCaptureActive: (active: boolean) => Promise<void>;
   switchProvider: (providerId: string) => Promise<Provider>;
   pickProviderIcon: () => Promise<ProviderIconPickResult | null>;
+  getProviderIconFromUrl: (url: string) => Promise<ProviderIconPickResult>;
   resolveProviderIcon: (icon: string) => Promise<string>;
   resizePopup: (size: PopupSize) => Promise<FloatAISettings>;
   resizePopupInteractive: (size: PopupSize) => Promise<void>;

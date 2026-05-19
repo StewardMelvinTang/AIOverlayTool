@@ -91,6 +91,7 @@ export default function PopupWindow() {
   const [providerError, setProviderError] = useState('');
   const [providerIconUrls, setProviderIconUrls] = useState<Record<string, string>>({});
   const [draftIconUrl, setDraftIconUrl] = useState('');
+  const [autoIconLoading, setAutoIconLoading] = useState(false);
   const [isResizingMode, setIsResizingMode] = useState(false);
   const [providerToDelete, setProviderToDelete] = useState<string | null>(null);
   const [providerTooltip, setProviderTooltip] = useState<ProviderTooltipState | null>(null);
@@ -642,6 +643,7 @@ export default function PopupWindow() {
     setProviderDraft(emptyProviderDraft);
     setDraftIconUrl('');
     setProviderError('');
+    setAutoIconLoading(false);
     setProviderFormOpen(true);
   }
 
@@ -653,6 +655,7 @@ export default function PopupWindow() {
       icon: provider.icon
     });
     setProviderError('');
+    setAutoIconLoading(false);
     setProviderFormOpen(true);
   }
 
@@ -668,6 +671,31 @@ export default function PopupWindow() {
       icon: pickedIcon.icon
     }));
     setDraftIconUrl(pickedIcon.url);
+  }
+
+  async function getIconForDraftAutomatically() {
+    const providerUrl = providerDraft.url.trim();
+
+    if (!providerUrl) {
+      setProviderError('Provider URL is required before getting an icon.');
+      return;
+    }
+
+    setAutoIconLoading(true);
+    setProviderError('');
+
+    try {
+      const pickedIcon = await window.floatAI.getProviderIconFromUrl(providerUrl);
+      setProviderDraft((currentDraft) => ({
+        ...currentDraft,
+        icon: pickedIcon.icon
+      }));
+      setDraftIconUrl(pickedIcon.url);
+    } catch (error) {
+      setProviderError(error instanceof Error ? error.message : 'Could not get an icon from that website.');
+    } finally {
+      setAutoIconLoading(false);
+    }
   }
 
   async function saveProvider() {
@@ -768,6 +796,7 @@ export default function PopupWindow() {
     setProviderDraft(emptyProviderDraft);
     setDraftIconUrl('');
     setProviderError('');
+    setAutoIconLoading(false);
     setProviderFormOpen(false);
   }
 
@@ -1595,6 +1624,15 @@ export default function PopupWindow() {
                         PNG
                       </button>
                     </div>
+                    <button
+                      className="auto-icon-button"
+                      type="button"
+                      onClick={getIconForDraftAutomatically}
+                      disabled={autoIconLoading}
+                    >
+                      <RefreshCw size={16} className={autoIconLoading ? 'spinning-icon' : ''} />
+                      {autoIconLoading ? 'Getting Icon' : 'Automatically Get Icon'}
+                    </button>
                   </div>
                   {providerError && <div className="form-error">{providerError}</div>}
                 </div>

@@ -13,7 +13,7 @@ import {
   Tray,
   type Rectangle
 } from 'electron';
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Store from 'electron-store';
@@ -49,10 +49,17 @@ let isHiding = false;
 let isShortcutCaptureActive = false;
 let popupTopGuardTimer: NodeJS.Timeout | undefined;
 let popupTopReassertTimers: NodeJS.Timeout[] = [];
+let popupMoveIdleTimer: NodeJS.Timeout | undefined;
+let isPopupMoving = false;
 
 
 type PopupBoundsOptions = {
   anchorToCursor?: boolean;
+};
+
+type WebsiteIconCandidate = {
+  url: string;
+  score: number;
 };
 
 type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[1]>;
@@ -277,6 +284,7 @@ function createPopupWindow(): BrowserWindow {
   });
 
   popupWindow.on('move', () => {
+    markPopupMoving();
     queuePopupPositionSave();
   });
 
@@ -301,6 +309,7 @@ function createPopupWindow(): BrowserWindow {
 
   popupWindow.on('closed', () => {
     stopPopupTopGuard();
+    resetPopupMoving();
     setShortcutCaptureActive(false);
     popupWindow = null;
     isPopupRendererReady = false;
@@ -382,6 +391,7 @@ function hidePopup(): void {
     return;
   }
 
+  resetPopupMoving();
   isHiding = true;
   savePopupPosition();
   sendToPopup('popup:animate', 'out');
@@ -450,7 +460,7 @@ function applyPopupTopMost(options: { moveToTop?: boolean } = {}): void {
 
   window.setAlwaysOnTop(true, popupAlwaysOnTopLevel);
 
-  if (options.moveToTop && window.isVisible() && !isHiding) {
+  if (options.moveToTop && window.isVisible() && !isHiding && !isPopupMoving) {
     window.moveTop();
   }
 }
@@ -480,6 +490,7 @@ function shouldKeepPopupOnTop(): boolean {
       !popupWindow.isDestroyed() &&
       popupWindow.isVisible() &&
       !isHiding &&
+      !isPopupMoving &&
       settings.popup.alwaysOnTop
   );
 }
@@ -516,7 +527,38 @@ function clearPopupTopReassertTimers(): void {
   popupTopReassertTimers = [];
 }
 
+function markPopupMoving(): void {
+  if (!popupWindow || popupWindow.isDestroyed() || isHiding) {
+    return;
+  }
 
+  isPopupMoving = true;
+  clearPopupTopReassertTimers();
+
+  if (popupTopGuardTimer) {
+    clearInterval(popupTopGuardTimer);
+    popupTopGuardTimer = undefined;
+  }
+
+  if (popupMoveIdleTimer) {
+    clearTimeout(popupMoveIdleTimer);
+  }
+
+  popupMoveIdleTimer = setTimeout(() => {
+    popupMoveIdleTimer = undefined;
+    isPopupMoving = false;
+    schedulePopupTopMostReassert();
+  }, 220);
+}
+
+function resetPopupMoving(): void {
+  if (popupMoveIdleTimer) {
+    clearTimeout(popupMoveIdleTimer);
+    popupMoveIdleTimer = undefined;
+  }
+
+  isPopupMoving = false;
+}
 
 function queuePopupPositionSave(): void {
   if (!settings.popup.rememberPosition || !popupWindow) {
@@ -673,6 +715,211 @@ async function pickProviderIcon(): Promise<ProviderIconPickResult | null> {
     icon: `custom:${fileName}`,
     url: pathToFileURL(destinationPath).toString()
   };
+}
+
+async function getProviderIconFromUrl(rawProviderUrl: string): Promise<ProviderIconPickResult> {
+  const providerUrl = normalizeWebsiteIconUrl(rawProviderUrl);
+  const candidates = await getWebsiteIconCandidates(providerUrl);
+
+  for (const candidate of candidates) {
+    const downloadedIcon = await downloadWebsiteIcon(candidate.url, providerUrl.hostname);
+
+    if (downloadedIcon) {
+      return downloadedIcon;
+    }
+  }
+
+  throw new Error('Could not find a website icon for that provider URL.');
+}
+
+function normalizeWebsiteIconUrl(value: string): URL {
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) {
+    throw new Error('Provider URL is required before getting an icon.');
+  }
+
+  const url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmedValue) ? trimmedValue : `https://${trimmedValue}`);
+
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Use an http or https URL before getting an icon.');
+  }
+
+  return url;
+}
+
+async function getWebsiteIconCandidates(providerUrl: URL): Promise<WebsiteIconCandidate[]> {
+  const candidates: WebsiteIconCandidate[] = [];
+
+  try {
+    const response = await net.fetch(providerUrl.toString());
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+
+    if (response.ok && contentType.includes('text/html')) {
+      candidates.push(...parseWebsiteIconCandidates(await response.text(), response.url || providerUrl.toString()));
+    }
+  } catch {
+    // Fallback candidates below still cover most sites.
+  }
+
+  const origin = providerUrl.origin;
+  candidates.push(
+    { url: new URL('/favicon.ico', origin).toString(), score: 10 },
+    { url: new URL('/favicon.png', origin).toString(), score: 8 },
+    { url: new URL('/apple-touch-icon.png', origin).toString(), score: 6 }
+  );
+
+  return dedupeIconCandidates(candidates).sort((a, b) => b.score - a.score);
+}
+
+function parseWebsiteIconCandidates(html: string, baseUrl: string): WebsiteIconCandidate[] {
+  const candidates: WebsiteIconCandidate[] = [];
+  const linkMatches = html.matchAll(/<link\b[^>]*>/gi);
+
+  for (const linkMatch of linkMatches) {
+    const tag = linkMatch[0];
+    const rel = getHtmlAttribute(tag, 'rel').toLowerCase();
+    const href = getHtmlAttribute(tag, 'href');
+
+    if (!href || !/\b(?:icon|apple-touch-icon|mask-icon)\b/i.test(rel) || href.trim().toLowerCase().startsWith('data:')) {
+      continue;
+    }
+
+    try {
+      candidates.push({
+        url: new URL(href, baseUrl).toString(),
+        score: getIconRelScore(rel) + getIconSizeScore(getHtmlAttribute(tag, 'sizes'))
+      });
+    } catch {
+      // Ignore malformed icon URLs in provider pages.
+    }
+  }
+
+  return candidates;
+}
+
+function getHtmlAttribute(tag: string, attributeName: string): string {
+  const attributePattern = /([a-zA-Z:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g;
+
+  for (const match of tag.matchAll(attributePattern)) {
+    if (match[1].toLowerCase() === attributeName) {
+      return match[2] ?? match[3] ?? match[4] ?? '';
+    }
+  }
+
+  return '';
+}
+
+function getIconRelScore(rel: string): number {
+  if (rel.includes('apple-touch-icon')) {
+    return 80;
+  }
+
+  if (rel.includes('shortcut icon')) {
+    return 70;
+  }
+
+  if (rel.includes('icon')) {
+    return 60;
+  }
+
+  return 30;
+}
+
+function getIconSizeScore(sizes: string): number {
+  const iconSizes = Array.from(sizes.matchAll(/(\d+)x(\d+)/gi)).map((match) =>
+    Math.max(Number(match[1]), Number(match[2]))
+  );
+
+  if (iconSizes.length === 0) {
+    return 0;
+  }
+
+  return Math.min(Math.max(...iconSizes), 512) / 8;
+}
+
+function dedupeIconCandidates(candidates: WebsiteIconCandidate[]): WebsiteIconCandidate[] {
+  const bestByUrl = new Map<string, WebsiteIconCandidate>();
+
+  for (const candidate of candidates) {
+    const existingCandidate = bestByUrl.get(candidate.url);
+
+    if (!existingCandidate || candidate.score > existingCandidate.score) {
+      bestByUrl.set(candidate.url, candidate);
+    }
+  }
+
+  return Array.from(bestByUrl.values());
+}
+
+async function downloadWebsiteIcon(iconUrl: string, hostname: string): Promise<ProviderIconPickResult | null> {
+  try {
+    const response = await net.fetch(iconUrl);
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const contentType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ?? '';
+    const extension = getWebsiteIconExtension(iconUrl, contentType);
+
+    if (!extension) {
+      return null;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+
+    if (buffer.length === 0 || buffer.length > 2 * 1024 * 1024) {
+      return null;
+    }
+
+    const iconsDirectory = path.join(app.getPath('userData'), 'provider-icons');
+    mkdirSync(iconsDirectory, { recursive: true });
+
+    const cleanHost = sanitizeIconFileName(hostname.replace(/^www\./, '')) || 'provider';
+    const fileName = `${Date.now()}-${cleanHost}-favicon.${extension}`;
+    const destinationPath = path.join(iconsDirectory, fileName);
+    writeFileSync(destinationPath, buffer);
+
+    return {
+      icon: `custom:${fileName}`,
+      url: pathToFileURL(destinationPath).toString()
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getWebsiteIconExtension(iconUrl: string, contentType: string): string | null {
+  const extensionByContentType = new Map([
+    ['image/png', 'png'],
+    ['image/x-png', 'png'],
+    ['image/jpeg', 'jpg'],
+    ['image/jpg', 'jpg'],
+    ['image/svg+xml', 'svg'],
+    ['image/webp', 'webp'],
+    ['image/avif', 'avif'],
+    ['image/gif', 'gif'],
+    ['image/vnd.microsoft.icon', 'ico'],
+    ['image/x-icon', 'ico'],
+    ['image/ico', 'ico']
+  ]);
+  const knownExtension = extensionByContentType.get(contentType);
+
+  if (knownExtension) {
+    return knownExtension;
+  }
+
+  if (contentType && !contentType.startsWith('image/')) {
+    return null;
+  }
+
+  try {
+    const extension = path.extname(new URL(iconUrl).pathname).slice(1).toLowerCase();
+    return ['png', 'jpg', 'jpeg', 'svg', 'webp', 'avif', 'gif', 'ico'].includes(extension) ? extension : 'ico';
+  } catch {
+    return 'ico';
+  }
 }
 
 function resolveProviderIcon(icon: string): string {
@@ -973,6 +1220,7 @@ function registerIpc(): void {
   ipcMain.handle('shortcut:captureActive', (_event, active: boolean) => setShortcutCaptureActive(Boolean(active)));
   ipcMain.handle('provider:switch', (_event, providerId: string) => switchProvider(providerId));
   ipcMain.handle('provider:pickIcon', () => pickProviderIcon());
+  ipcMain.handle('provider:getIconFromUrl', (_event, url: string) => getProviderIconFromUrl(url));
   ipcMain.handle('provider:resolveIcon', (_event, icon: string) => resolveProviderIcon(icon));
   ipcMain.handle('popup:resize', (_event, size: PopupSize) => resizePopup(size));
   ipcMain.handle('popup:resizeInteractive', (_event, size: PopupSize) => {

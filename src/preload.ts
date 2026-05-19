@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   FloatAIBridge,
   PopupPosition,
+  ProviderIconPickResult,
   PopupSize,
   WebviewNavigationDirection
 } from './shared/bridge';
@@ -18,6 +19,8 @@ const bridge: FloatAIBridge = {
   setShortcutCaptureActive: (active: boolean) => ipcRenderer.invoke('shortcut:captureActive', active) as Promise<void>,
   switchProvider: (providerId: string) => ipcRenderer.invoke('provider:switch', providerId) as Promise<Provider>,
   pickProviderIcon: () => ipcRenderer.invoke('provider:pickIcon'),
+  getProviderIconFromUrl: (url: string) =>
+    ipcRenderer.invoke('provider:getIconFromUrl', url) as Promise<ProviderIconPickResult>,
   resolveProviderIcon: (icon: string) => ipcRenderer.invoke('provider:resolveIcon', icon) as Promise<string>,
   resizePopup: (size: PopupSize) => ipcRenderer.invoke('popup:resize', size) as Promise<FloatAISettings>,
   resizePopupInteractive: (size: PopupSize) => ipcRenderer.invoke('popup:resizeInteractive', size) as Promise<void>,
