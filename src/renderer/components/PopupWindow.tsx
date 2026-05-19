@@ -1621,7 +1621,7 @@ export default function PopupWindow() {
                       />
                       <button className="icon-pick-button" type="button" onClick={pickIconForDraft}>
                         <ImagePlus size={18} />
-                        PNG
+                        Image
                       </button>
                     </div>
                     <button

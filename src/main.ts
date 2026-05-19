@@ -690,8 +690,8 @@ async function pickProviderIcon(): Promise<ProviderIconPickResult | null> {
     properties: ['openFile'],
     filters: [
       {
-        name: 'PNG Images',
-        extensions: ['png']
+        name: 'Image Files',
+        extensions: ['png', 'jpg', 'jpeg', 'svg', 'webp', 'avif', 'gif', 'ico']
       }
     ]
   };
@@ -764,6 +764,7 @@ async function getWebsiteIconCandidates(providerUrl: URL): Promise<WebsiteIconCa
 
   const origin = providerUrl.origin;
   candidates.push(
+    { url: `https://www.google.com/s2/favicons?domain=${providerUrl.hostname}&sz=256`, score: 75 },
     { url: new URL('/favicon.ico', origin).toString(), score: 10 },
     { url: new URL('/favicon.png', origin).toString(), score: 8 },
     { url: new URL('/apple-touch-icon.png', origin).toString(), score: 6 }

@@ -210,7 +210,6 @@ button {
   padding: 2px 1px;
   -webkit-app-region: drag;
   scrollbar-width: none;
-  flex: 1;
 }
 
 .provider-strip::-webkit-scrollbar {
