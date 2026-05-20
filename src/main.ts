@@ -1079,6 +1079,15 @@ function createTrayMenu(): Menu {
     },
     { type: 'separator' },
     {
+      label: 'Privacy Capture Protection',
+      type: 'checkbox',
+      checked: settings.privacy?.captureProtection ?? false,
+      click: (menuItem) => {
+        updateSettings({ privacy: { captureProtection: menuItem.checked } });
+      }
+    },
+    { type: 'separator' },
+    {
       label: 'Refresh Pages',
       click: () => reloadAllWebviews()
     },
