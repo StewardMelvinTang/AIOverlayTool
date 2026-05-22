@@ -299,7 +299,6 @@ function createPopupWindow(): BrowserWindow {
   });
 
   popupWindow.on('move', () => {
-    normalizePopupSizeAfterMove();
     markPopupMoving();
     queuePopupPositionSave();
   });
@@ -563,6 +562,7 @@ function markPopupMoving(): void {
   popupMoveIdleTimer = setTimeout(() => {
     popupMoveIdleTimer = undefined;
     isPopupMoving = false;
+    normalizePopupSizeAfterMove();
     schedulePopupTopMostReassert();
   }, 220);
 }
