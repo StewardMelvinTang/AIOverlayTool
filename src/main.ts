@@ -562,7 +562,6 @@ function markPopupMoving(): void {
   popupMoveIdleTimer = setTimeout(() => {
     popupMoveIdleTimer = undefined;
     isPopupMoving = false;
-    normalizePopupSizeAfterMove();
     schedulePopupTopMostReassert();
   }, 220);
 }
