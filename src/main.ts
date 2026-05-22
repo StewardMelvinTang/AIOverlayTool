@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   globalShortcut,
   ipcMain,
@@ -25,6 +26,19 @@ import {
   type Provider
 } from './shared/settings';
 import type { ProviderIconPickResult, PopupPosition, PopupSize } from './shared/bridge';
+import type { ScratchPadNotePatch } from './shared/addons';
+import {
+  getAddonDownloads,
+  getAddonState,
+  installAddon,
+  uninstallAddon
+} from './main/addonStorage';
+import {
+  createScratchPadNote,
+  deleteScratchPadNote,
+  getScratchPadNotes,
+  updateScratchPadNote
+} from './main/scratchPadStorage';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === 'darwin';
@@ -51,6 +65,7 @@ let popupTopGuardTimer: NodeJS.Timeout | undefined;
 let popupTopReassertTimers: NodeJS.Timeout[] = [];
 let popupMoveIdleTimer: NodeJS.Timeout | undefined;
 let isPopupMoving = false;
+let isPopupResizeInProgress = false;
 
 
 type PopupBoundsOptions = {
@@ -284,6 +299,7 @@ function createPopupWindow(): BrowserWindow {
   });
 
   popupWindow.on('move', () => {
+    normalizePopupSizeAfterMove();
     markPopupMoving();
     queuePopupPositionSave();
   });
@@ -558,6 +574,29 @@ function resetPopupMoving(): void {
   }
 
   isPopupMoving = false;
+}
+
+function normalizePopupSizeAfterMove(): void {
+  if (!popupWindow || popupWindow.isDestroyed() || isPopupResizeInProgress) {
+    return;
+  }
+
+  const bounds = popupWindow.getBounds();
+  const expectedWidth = Math.round(settings.popup.width);
+  const expectedHeight = Math.round(settings.popup.height);
+
+  if (bounds.width === expectedWidth && bounds.height === expectedHeight) {
+    return;
+  }
+
+  popupWindow.setBounds(
+    {
+      ...bounds,
+      width: expectedWidth,
+      height: expectedHeight
+    },
+    false
+  );
 }
 
 function queuePopupPositionSave(): void {
@@ -1236,11 +1275,29 @@ function registerIpc(): void {
   ipcMain.handle('popup:resizeInteractive', (_event, size: PopupSize) => {
     if (popupWindow && !popupWindow.isDestroyed()) {
       const bounds = popupWindow.getBounds();
-      popupWindow.setBounds({ ...bounds, width: Math.round(size.width), height: Math.round(size.height) }, false);
+      isPopupResizeInProgress = true;
+      try {
+        popupWindow.setBounds({ ...bounds, width: Math.round(size.width), height: Math.round(size.height) }, false);
+      } finally {
+        isPopupResizeInProgress = false;
+      }
     }
   });
   ipcMain.handle('popup:savePosition', (_event, position: PopupPosition) => savePopupPosition(position));
   ipcMain.handle('webview:reloadAll', () => reloadAllWebviews());
+  ipcMain.handle('addons:getState', () => getAddonState());
+  ipcMain.handle('addons:install', (_event, addonId: string) => installAddon(addonId));
+  ipcMain.handle('addons:uninstall', (_event, addonId: string) => uninstallAddon(addonId));
+  ipcMain.handle('addons:getDownloads', () => getAddonDownloads());
+  ipcMain.handle('scratchpad:getNotes', () => getScratchPadNotes());
+  ipcMain.handle('scratchpad:createNote', () => createScratchPadNote());
+  ipcMain.handle('scratchpad:updateNote', (_event, noteId: string, patch: ScratchPadNotePatch) =>
+    updateScratchPadNote(noteId, patch)
+  );
+  ipcMain.handle('scratchpad:deleteNote', (_event, noteId: string) => deleteScratchPadNote(noteId));
+  ipcMain.handle('clipboard:writeText', (_event, text: string) => {
+    clipboard.writeText(text);
+  });
 }
 
 registerIpc();

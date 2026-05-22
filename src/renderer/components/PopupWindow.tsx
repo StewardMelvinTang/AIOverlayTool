@@ -2,6 +2,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Blocks,
   Edit3,
   GripVertical,
   HelpCircle,
@@ -26,6 +27,7 @@ import {
   type Provider
 } from '../../shared/settings';
 import type { WebviewNavigationDirection } from '../../shared/bridge';
+import AddonsOverlay from './addons/AddonsOverlay';
 
 type SettingsTab = 'window' | 'providers' | 'shortcut' | 'performance';
 
@@ -80,6 +82,7 @@ export default function PopupWindow() {
   const [settings, setSettings] = useState<FloatAISettings | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<string>('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [addonsOpen, setAddonsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('window');
   const [loadingByProvider, setLoadingByProvider] = useState<Record<string, boolean>>({});
   const [hotkeyDraft, setHotkeyDraft] = useState('');
@@ -124,23 +127,23 @@ export default function PopupWindow() {
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
+    const maxScrollLeft = container.scrollWidth - container.clientWidth;
 
-    if (Math.abs(e.deltaX) > 0) {
-      e.preventDefault();
-      container.scrollTo({
-        left: container.scrollLeft + e.deltaX,
-        behavior: 'auto'
-      });
+    if (maxScrollLeft <= 0) {
       return;
     }
 
-    if (e.deltaY !== 0) {
-      e.preventDefault();
-      container.scrollTo({
-        left: container.scrollLeft + e.deltaY,
-        behavior: 'smooth'
-      });
+    const rawDelta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (rawDelta === 0) {
+      return;
     }
+
+    const multiplier = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? container.clientWidth : 1;
+    const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, container.scrollLeft + rawDelta * multiplier));
+
+    e.preventDefault();
+    container.scrollLeft = nextScrollLeft;
+    window.requestAnimationFrame(checkStripScroll);
   };
 
   function updateLoadedProviders(updater: (current: Set<string>) => Set<string>) {
@@ -254,6 +257,7 @@ export default function PopupWindow() {
     });
 
     const removeOpenSettingsListener = window.floatAI.onOpenSettingsRequested(() => {
+      setAddonsOpen(false);
       setSettingsOpen(true);
       setSettingsTab('window');
     });
@@ -566,6 +570,7 @@ export default function PopupWindow() {
 
     setSelectedProviderId(providerId);
     setSettingsOpen(false);
+    setAddonsOpen(false);
     await window.floatAI.switchProvider(providerId);
     void markProviderVisited(providerId);
   }
@@ -1057,6 +1062,7 @@ export default function PopupWindow() {
 
   const handleResizePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
+    e.stopPropagation();
     if (!settings) return;
 
     const target = e.currentTarget;
@@ -1164,48 +1170,63 @@ export default function PopupWindow() {
         onDoubleClick={suppressMacToolbarEvent}
         onMouseDown={suppressMacToolbarMouseDown}
       >
-        <div className={`provider-strip-wrapper ${scrollState.left ? 'mask-left' : ''} ${scrollState.right ? 'mask-right' : ''}`}>
-          <div
-            className="provider-strip"
-            aria-label="Providers"
-            ref={providerStripRef}
-            onScroll={checkStripScroll}
-            onWheel={handleWheel}
+        <div className="toolbar-provider-area">
+          <button
+            className={addonsOpen ? 'apps-launcher-button no-drag active' : 'apps-launcher-button no-drag'}
+            type="button"
+            onClick={() => {
+              setAddonsOpen((open) => !open);
+              setSettingsOpen(false);
+            }}
+            title="Apps"
+            aria-label="Open apps"
           >
-            {settings.providers.map((provider) => {
-              const isActiveProvider = provider.id === selectedProvider.id;
-              const isCompactProviderBar = settings.compactProviderBar ?? false;
-              const showProviderLabel = !isCompactProviderBar || isActiveProvider;
+            <Blocks size={17} />
+          </button>
+          <span className="provider-apps-divider" aria-hidden="true" />
+          <div className={`provider-strip-wrapper ${scrollState.left ? 'mask-left' : ''} ${scrollState.right ? 'mask-right' : ''}`}>
+            <div
+              className="provider-strip"
+              aria-label="Providers"
+              ref={providerStripRef}
+              onScroll={checkStripScroll}
+              onWheel={handleWheel}
+            >
+              {settings.providers.map((provider) => {
+                const isActiveProvider = provider.id === selectedProvider.id;
+                const isCompactProviderBar = settings.compactProviderBar ?? false;
+                const showProviderLabel = !isCompactProviderBar || isActiveProvider;
 
-              return (
-                <button
-                  key={provider.id}
-                  type="button"
-                  className={[
-                    'provider-pill',
-                    isActiveProvider ? 'active' : '',
-                    isCompactProviderBar ? 'compact-provider-pill' : '',
-                    showProviderLabel ? 'has-visible-label' : ''
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
-                  onClick={() => handleProviderChange(provider.id)}
-                  onMouseEnter={(event) => showProviderTooltip(provider.id, event.currentTarget)}
-                  onMouseLeave={hideProviderTooltip}
-                  onFocus={(event) => showProviderTooltip(provider.id, event.currentTarget)}
-                  onBlur={hideProviderTooltip}
-                  aria-label={`${provider.name}, ${formatProviderWebPage(provider.url)}`}
-                >
-                  <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
-                  <span
-                    className={showProviderLabel ? 'provider-pill-label visible' : 'provider-pill-label'}
-                    aria-hidden={!showProviderLabel}
+                return (
+                  <button
+                    key={provider.id}
+                    type="button"
+                    className={[
+                      'provider-pill',
+                      isActiveProvider ? 'active' : '',
+                      isCompactProviderBar ? 'compact-provider-pill' : '',
+                      showProviderLabel ? 'has-visible-label' : ''
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    onClick={() => handleProviderChange(provider.id)}
+                    onMouseEnter={(event) => showProviderTooltip(provider.id, event.currentTarget)}
+                    onMouseLeave={hideProviderTooltip}
+                    onFocus={(event) => showProviderTooltip(provider.id, event.currentTarget)}
+                    onBlur={hideProviderTooltip}
+                    aria-label={`${provider.name}, ${formatProviderWebPage(provider.url)}`}
                   >
-                    {provider.name}
-                  </span>
-                </button>
-              );
-            })}
+                    <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
+                    <span
+                      className={showProviderLabel ? 'provider-pill-label visible' : 'provider-pill-label'}
+                      aria-hidden={!showProviderLabel}
+                    >
+                      {provider.name}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
         {settings.popup.showProviderTooltip && tooltipProvider && providerTooltip && (
@@ -1235,7 +1256,10 @@ export default function PopupWindow() {
         <button
           className={settingsOpen ? 'icon-button no-drag active' : 'icon-button no-drag'}
           type="button"
-          onClick={() => setSettingsOpen((open) => !open)}
+          onClick={() => {
+            setSettingsOpen((open) => !open);
+            setAddonsOpen(false);
+          }}
           title="Settings"
         >
           <Settings size={17} />
@@ -1244,6 +1268,7 @@ export default function PopupWindow() {
           <X size={18} />
         </button>
       </header>
+      {addonsOpen && <AddonsOverlay onClose={() => setAddonsOpen(false)} />}
       {loadingByProvider[selectedProvider.id] && <div className="webview-progress" />}
       <main className="popup-content">
         <div className="webview-stack">

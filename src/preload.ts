@@ -26,6 +26,15 @@ const bridge: FloatAIBridge = {
   resizePopupInteractive: (size: PopupSize) => ipcRenderer.invoke('popup:resizeInteractive', size) as Promise<void>,
   savePopupPosition: (position: PopupPosition) =>
     ipcRenderer.invoke('popup:savePosition', position) as Promise<FloatAISettings>,
+  getAddonState: () => ipcRenderer.invoke('addons:getState'),
+  installAddon: (addonId: string) => ipcRenderer.invoke('addons:install', addonId),
+  uninstallAddon: (addonId: string) => ipcRenderer.invoke('addons:uninstall', addonId),
+  getAddonDownloads: () => ipcRenderer.invoke('addons:getDownloads'),
+  getScratchPadNotes: () => ipcRenderer.invoke('scratchpad:getNotes'),
+  createScratchPadNote: () => ipcRenderer.invoke('scratchpad:createNote'),
+  updateScratchPadNote: (noteId, patch) => ipcRenderer.invoke('scratchpad:updateNote', noteId, patch),
+  deleteScratchPadNote: (noteId) => ipcRenderer.invoke('scratchpad:deleteNote', noteId),
+  copyText: (text) => ipcRenderer.invoke('clipboard:writeText', text) as Promise<void>,
   onSettingsChanged: (callback: (settings: FloatAISettings) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, nextSettings: FloatAISettings) => callback(nextSettings);
     ipcRenderer.on('settings:changed', listener);

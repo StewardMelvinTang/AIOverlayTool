@@ -6,3 +6,4 @@ release/
 .vite/
 .env
 .DS_Store
+build-backups/

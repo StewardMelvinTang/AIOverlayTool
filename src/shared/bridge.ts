@@ -1,4 +1,10 @@
 import type { DeepPartial, FloatAISettings, Provider } from './settings';
+import type {
+  AddonDownloadTask,
+  AddonStorageState,
+  ScratchPadNote,
+  ScratchPadNotePatch
+} from './addons';
 
 export type PopupSize = {
   width: number;
@@ -32,6 +38,15 @@ export type FloatAIBridge = {
   resizePopup: (size: PopupSize) => Promise<FloatAISettings>;
   resizePopupInteractive: (size: PopupSize) => Promise<void>;
   savePopupPosition: (position: PopupPosition) => Promise<FloatAISettings>;
+  getAddonState: () => Promise<AddonStorageState>;
+  installAddon: (addonId: string) => Promise<AddonStorageState>;
+  uninstallAddon: (addonId: string) => Promise<AddonStorageState>;
+  getAddonDownloads: () => Promise<AddonDownloadTask[]>;
+  getScratchPadNotes: () => Promise<ScratchPadNote[]>;
+  createScratchPadNote: () => Promise<ScratchPadNote>;
+  updateScratchPadNote: (noteId: string, patch: ScratchPadNotePatch) => Promise<ScratchPadNote>;
+  deleteScratchPadNote: (noteId: string) => Promise<ScratchPadNote[]>;
+  copyText: (text: string) => Promise<void>;
   onSettingsChanged: (callback: (settings: FloatAISettings) => void) => () => void;
   onProviderChanged: (callback: (provider: Provider) => void) => () => void;
   onOpenSettingsRequested: (callback: () => void) => () => void;

@@ -19,6 +19,7 @@
     "dist:win": "npm run build && electron-builder --win"
   },
   "dependencies": {
+    "@cloudflare/speedtest": "^1.9.0",
     "@vitejs/plugin-react": "^5.0.4",
     "electron-store": "^7.0.0",
     "lucide-react": "^0.468.0",
