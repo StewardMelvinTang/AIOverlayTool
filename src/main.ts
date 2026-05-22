@@ -589,14 +589,7 @@ function normalizePopupSizeAfterMove(): void {
     return;
   }
 
-  popupWindow.setBounds(
-    {
-      ...bounds,
-      width: expectedWidth,
-      height: expectedHeight
-    },
-    false
-  );
+  popupWindow.setSize(expectedWidth, expectedHeight, false);
 }
 
 function queuePopupPositionSave(): void {
