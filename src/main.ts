@@ -303,6 +303,7 @@ function createPopupWindow(): BrowserWindow {
     queuePopupPositionSave();
   });
 
+
   const minimizableWindow = popupWindow as unknown as {
     on: (event: 'minimize', listener: (event: { preventDefault: () => void }) => void) => void;
   };
@@ -1290,6 +1291,7 @@ function registerIpc(): void {
   ipcMain.handle('clipboard:writeText', (_event, text: string) => {
     clipboard.writeText(text);
   });
+
 }
 
 registerIpc();

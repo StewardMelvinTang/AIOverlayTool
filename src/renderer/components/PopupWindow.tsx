@@ -1095,6 +1095,7 @@ export default function PopupWindow() {
     target.addEventListener('pointerup', onPointerUp);
   };
 
+
   const suppressMacToolbarEvent = (event: React.MouseEvent<HTMLElement>) => {
     if (!isMac) {
       return;
