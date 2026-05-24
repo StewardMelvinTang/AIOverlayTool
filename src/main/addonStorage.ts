@@ -53,13 +53,17 @@ export function getAddonDownloads(): AddonDownloadTask[] {
   return [];
 }
 
-function saveAddonState(nextState: AddonStorageState): AddonStorageState {
+export function restoreAddonState(value: unknown): AddonStorageState {
+  return saveAddonState(value);
+}
+
+function saveAddonState(nextState: unknown): AddonStorageState {
   addonState = normalizeAddonStorageState(nextState);
   addonStore.set(addonState);
   return addonState;
 }
 
-function normalizeAddonStorageState(value: unknown): AddonStorageState {
+export function normalizeAddonStorageState(value: unknown): AddonStorageState {
   const input = value && typeof value === 'object' ? (value as Partial<AddonStorageState>) : {};
   const installedAddonsInput =
     input.installedAddons && typeof input.installedAddons === 'object' ? input.installedAddons : {};

@@ -14,7 +14,7 @@ import {
   Tray,
   type Rectangle
 } from 'electron';
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import Store from 'electron-store';
@@ -25,18 +25,31 @@ import {
   type FloatAISettings,
   type Provider
 } from './shared/settings';
-import type { ProviderIconPickResult, PopupPosition, PopupSize } from './shared/bridge';
+import { providerWebSessionPartition, type ProviderIconPickResult, type PopupPosition, type PopupSize } from './shared/bridge';
+import {
+  type PortableBackupFile,
+  type PortableBackupResult,
+  type PortableBackupSummary,
+  type PortableProviderIcon,
+  portableBackupExtension,
+  portableBackupFormat,
+  portableBackupVersion
+} from './shared/backup';
 import type { ScratchPadNotePatch } from './shared/addons';
 import {
   getAddonDownloads,
   getAddonState,
   installAddon,
+  normalizeAddonStorageState,
+  restoreAddonState,
   uninstallAddon
 } from './main/addonStorage';
 import {
   createScratchPadNote,
   deleteScratchPadNote,
   getScratchPadNotes,
+  normalizeScratchPadStorageState,
+  restoreScratchPadState,
   updateScratchPadNote
 } from './main/scratchPadStorage';
 
@@ -46,12 +59,15 @@ const isWindows = process.platform === 'win32';
 const appDisplayName = 'Float AI';
 const appUserModelId = 'com.floatai.launcher';
 const macDefaultHotkey = 'Option+Space';
+const platformDefaultSettings = isMac
+  ? deepMergeSettings(defaultSettings, { globalHotkey: macDefaultHotkey })
+  : defaultSettings;
 const store = new Store<FloatAISettings>({
   name: 'float-ai-launcher',
-  defaults: defaultSettings
+  defaults: platformDefaultSettings
 });
 
-let settings = applyPlatformSettings(deepMergeSettings(defaultSettings, store.store as DeepPartial<FloatAISettings>));
+let settings = deepMergeSettings(platformDefaultSettings, store.store as DeepPartial<FloatAISettings>);
 let popupWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let registeredHotkey: string | null = null;
@@ -82,6 +98,8 @@ type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[
 const popupAlwaysOnTopLevel: AlwaysOnTopLevel = isWindows ? 'screen-saver' : 'floating';
 const popupTopGuardIntervalMs = 900;
 const popupTopReassertDelaysMs = [0, 80, 240];
+const maxPortableBackupBytes = 32 * 1024 * 1024;
+const maxPortableIconBytes = 5 * 1024 * 1024;
 
 if (!settings.performance.hardwareAcceleration) {
   app.disableHardwareAcceleration();
@@ -98,24 +116,6 @@ app.setName(appDisplayName);
 
 if (isWindows) {
   app.setAppUserModelId(appUserModelId);
-}
-
-function applyPlatformSettings(nextSettings: FloatAISettings): FloatAISettings {
-  if (!isMac) {
-    return nextSettings;
-  }
-
-  const patch: DeepPartial<FloatAISettings> = {};
-
-  if (nextSettings.globalHotkey === defaultSettings.globalHotkey) {
-    patch.globalHotkey = macDefaultHotkey;
-  }
-
-  if (!nextSettings.showTrayIcon) {
-    patch.showTrayIcon = true;
-  }
-
-  return Object.keys(patch).length > 0 ? deepMergeSettings(nextSettings, patch) : nextSettings;
 }
 
 function getPreloadPath(): string {
@@ -156,6 +156,84 @@ function loadRenderer(window: BrowserWindow, windowName: 'popup' | 'settings'): 
   window.loadFile(getRendererUrl(windowName), {
     query: {
       window: windowName
+    }
+  });
+}
+
+function isAllowedProviderPopupUrl(url: string): boolean {
+  if (!url || url === 'about:blank') {
+    return true;
+  }
+
+  try {
+    const parsedUrl = new URL(url);
+    return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function openExternalUrl(url: string): void {
+  if (!url || url === 'about:blank') {
+    return;
+  }
+
+  try {
+    const parsedUrl = new URL(url);
+    if (parsedUrl.protocol !== 'mailto:' && parsedUrl.protocol !== 'tel:') {
+      return;
+    }
+  } catch {
+    return;
+  }
+
+  void shell.openExternal(url).catch((error) => {
+    console.warn(`Could not open external URL "${url}".`, error);
+  });
+}
+
+function providerPopupWindowOptions(): Electron.BrowserWindowConstructorOptions {
+  return {
+    title: `${appDisplayName} - Sign In`,
+    width: 920,
+    height: 760,
+    minWidth: 480,
+    minHeight: 520,
+    parent: popupWindow ?? undefined,
+    autoHideMenuBar: true,
+    fullscreenable: false,
+    backgroundColor: '#ffffff',
+    webPreferences: {
+      partition: providerWebSessionPartition,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false
+    }
+  };
+}
+
+function configureProviderPopupWindow(window: BrowserWindow): void {
+  if (isMac) {
+    window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    if (!isAllowedProviderPopupUrl(url)) {
+      openExternalUrl(url);
+      return { action: 'deny' };
+    }
+
+    return {
+      action: 'allow',
+      overrideBrowserWindowOptions: providerPopupWindowOptions()
+    };
+  });
+
+  window.webContents.on('will-navigate', (event, url) => {
+    if (!isAllowedProviderPopupUrl(url)) {
+      event.preventDefault();
+      openExternalUrl(url);
     }
   });
 }
@@ -268,6 +346,10 @@ function createPopupWindow(): BrowserWindow {
       webviewTag: true
     }
   });
+
+  if (isMac) {
+    popupWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
 
   applyPopupTopMost({ moveToTop: true });
 
@@ -633,7 +715,7 @@ function savePopupPosition(position?: PopupPosition): FloatAISettings {
 function updateSettings(patch: DeepPartial<FloatAISettings>): FloatAISettings {
   const previousSettings = settings;
   const previousHotkey = settings.globalHotkey;
-  settings = applyPlatformSettings(deepMergeSettings(settings, patch));
+  settings = deepMergeSettings(settings, patch);
 
   if (!settings.providers.some((provider) => provider.id === currentProviderId)) {
     currentProviderId = settings.defaultProviderId;
@@ -989,6 +1071,317 @@ function sanitizeIconFileName(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '-');
 }
 
+async function exportPortableBackup(): Promise<PortableBackupResult> {
+  const backup = buildPortableBackup();
+  const serializedBackup = `${JSON.stringify(backup, null, 2)}\n`;
+
+  if (Buffer.byteLength(serializedBackup, 'utf8') > maxPortableBackupBytes) {
+    throw new Error('Your local data is too large to export in one backup file.');
+  }
+
+  const defaultFileName = `Float-AI-Backup-${new Date().toISOString().slice(0, 10)}.${portableBackupExtension}`;
+  const dialogOptions: Electron.SaveDialogOptions = {
+    title: 'Export Float AI backup',
+    defaultPath: defaultFileName,
+    buttonLabel: 'Export Backup',
+    filters: [{ name: 'Float AI Backup', extensions: ['json'] }]
+  };
+  const result =
+    popupWindow && !popupWindow.isDestroyed()
+      ? await dialog.showSaveDialog(popupWindow, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions);
+
+  if (result.canceled || !result.filePath) {
+    return { canceled: true };
+  }
+
+  writeFileSync(result.filePath, serializedBackup, 'utf8');
+  return {
+    canceled: false,
+    filePath: result.filePath,
+    summary: summarizePortableBackup(backup)
+  };
+}
+
+async function importPortableBackup(): Promise<PortableBackupResult> {
+  const dialogOptions: Electron.OpenDialogOptions = {
+    title: 'Import Float AI backup',
+    buttonLabel: 'Choose Backup',
+    properties: ['openFile'],
+    filters: [{ name: 'Float AI Backup', extensions: ['json'] }]
+  };
+  const result =
+    popupWindow && !popupWindow.isDestroyed()
+      ? await dialog.showOpenDialog(popupWindow, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
+
+  if (result.canceled || !result.filePaths[0]) {
+    return { canceled: true };
+  }
+
+  const filePath = result.filePaths[0];
+
+  if (statSync(filePath).size > maxPortableBackupBytes) {
+    throw new Error('That backup file is too large to import.');
+  }
+
+  let parsedBackup: unknown;
+
+  try {
+    parsedBackup = JSON.parse(readFileSync(filePath, 'utf8')) as unknown;
+  } catch {
+    throw new Error('That file is not a valid Float AI backup.');
+  }
+
+  const backup = normalizePortableBackup(parsedBackup);
+  const summary = summarizePortableBackup(backup);
+  const details = [
+    `${summary.providers} provider(s), ${summary.installedAddons} add-on(s), ${summary.scratchPadNotes} ScratchPad note(s), and ${summary.customProviderIcons} custom icon(s) will be restored.`,
+    '',
+    'This replaces your current Float AI settings and local add-on data.',
+    'Login sessions are not included, so you will need to sign in again on this device.'
+  ].join('\n');
+  const confirmationOptions: Electron.MessageBoxOptions = {
+    type: 'warning',
+    title: 'Restore Float AI Backup',
+    message: 'Replace current app data with this backup?',
+    detail: details,
+    buttons: ['Restore Backup', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  };
+  const confirmation =
+    popupWindow && !popupWindow.isDestroyed()
+      ? await dialog.showMessageBox(popupWindow, confirmationOptions)
+      : await dialog.showMessageBox(confirmationOptions);
+
+  if (confirmation.response !== 0) {
+    return { canceled: true };
+  }
+
+  restorePortableProviderIcons(backup.data.providerIcons);
+  const warnings: string[] = [];
+  const previousHotkey = settings.globalHotkey;
+
+  try {
+    updateSettings(backup.data.settings);
+  } catch {
+    updateSettings({
+      ...backup.data.settings,
+      globalHotkey: previousHotkey
+    });
+    warnings.push('The backed-up shortcut is unavailable on this device, so your current shortcut was kept.');
+  }
+
+  restoreAddonState(backup.data.addons);
+  restoreScratchPadState(backup.data.scratchPad);
+
+  return {
+    canceled: false,
+    filePath,
+    summary,
+    ...(warnings.length > 0 ? { warnings } : {})
+  };
+}
+
+function buildPortableBackup(): PortableBackupFile {
+  return {
+    format: portableBackupFormat,
+    formatVersion: portableBackupVersion,
+    appVersion: app.getVersion(),
+    exportedAt: new Date().toISOString(),
+    sourcePlatform: process.platform,
+    includedData: {
+      settings: true,
+      providers: true,
+      providerIcons: true,
+      addons: true,
+      scratchPad: true,
+      loginSessions: false
+    },
+    data: {
+      settings,
+      addons: getAddonState(),
+      scratchPad: { notes: getScratchPadNotes() },
+      providerIcons: exportPortableProviderIcons()
+    }
+  };
+}
+
+function normalizePortableBackup(value: unknown): PortableBackupFile {
+  if (!value || typeof value !== 'object') {
+    throw new Error('That file is not a valid Float AI backup.');
+  }
+
+  const backup = value as Partial<PortableBackupFile>;
+
+  if (backup.format !== portableBackupFormat || backup.formatVersion !== portableBackupVersion) {
+    throw new Error('This backup format is not supported by this version of Float AI.');
+  }
+
+  if (!backup.data || typeof backup.data !== 'object') {
+    throw new Error('That backup does not contain restorable app data.');
+  }
+
+  const data = backup.data as {
+    settings?: unknown;
+    addons?: unknown;
+    scratchPad?: unknown;
+    providerIcons?: unknown;
+  };
+
+  if (!data.settings || typeof data.settings !== 'object') {
+    throw new Error('That backup does not contain valid settings.');
+  }
+
+  const restoredSettings = deepMergeSettings(platformDefaultSettings, data.settings as DeepPartial<FloatAISettings>);
+
+  return {
+    format: portableBackupFormat,
+    formatVersion: portableBackupVersion,
+    appVersion: typeof backup.appVersion === 'string' ? backup.appVersion : 'unknown',
+    exportedAt: typeof backup.exportedAt === 'string' ? backup.exportedAt : '',
+    sourcePlatform: typeof backup.sourcePlatform === 'string' ? backup.sourcePlatform : 'unknown',
+    includedData: {
+      settings: true,
+      providers: true,
+      providerIcons: true,
+      addons: true,
+      scratchPad: true,
+      loginSessions: false
+    },
+    data: {
+      settings: restoredSettings,
+      addons: normalizeAddonStorageState(data.addons),
+      scratchPad: normalizeScratchPadStorageState(data.scratchPad),
+      providerIcons: normalizePortableProviderIcons(data.providerIcons, restoredSettings.providers)
+    }
+  };
+}
+
+function exportPortableProviderIcons(): Record<string, PortableProviderIcon> {
+  const providerIcons: Record<string, PortableProviderIcon> = {};
+  const iconsDirectory = path.join(app.getPath('userData'), 'provider-icons');
+  let totalBytes = 0;
+
+  for (const provider of settings.providers) {
+    const fileName = getSafeCustomIconFileName(provider.icon);
+
+    if (!fileName || providerIcons[provider.icon]) {
+      continue;
+    }
+
+    const iconPath = path.join(iconsDirectory, fileName);
+
+    try {
+      const iconStat = lstatSync(iconPath);
+
+      if (
+        !iconStat.isFile() ||
+        iconStat.size === 0 ||
+        iconStat.size > maxPortableIconBytes ||
+        totalBytes + iconStat.size > maxPortableBackupBytes / 2
+      ) {
+        continue;
+      }
+
+      totalBytes += iconStat.size;
+      providerIcons[provider.icon] = {
+        fileName,
+        dataBase64: readFileSync(iconPath).toString('base64')
+      };
+    } catch {
+      // Missing custom icon files do not make the rest of a backup unusable.
+    }
+  }
+
+  return providerIcons;
+}
+
+function normalizePortableProviderIcons(value: unknown, providers: Provider[]): Record<string, PortableProviderIcon> {
+  const input = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const providerIcons: Record<string, PortableProviderIcon> = {};
+  const referencedIconKeys = new Set(providers.map((provider) => provider.icon));
+  let totalBytes = 0;
+
+  for (const iconKey of referencedIconKeys) {
+    const fileName = getSafeCustomIconFileName(iconKey);
+    const iconValue = input[iconKey];
+
+    if (!fileName || !iconValue || typeof iconValue !== 'object') {
+      continue;
+    }
+
+    const icon = iconValue as Partial<PortableProviderIcon>;
+
+    if (
+      icon.fileName !== fileName ||
+      typeof icon.dataBase64 !== 'string' ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(icon.dataBase64)
+    ) {
+      continue;
+    }
+
+    const data = Buffer.from(icon.dataBase64, 'base64');
+
+    if (
+      data.byteLength === 0 ||
+      data.byteLength > maxPortableIconBytes ||
+      totalBytes + data.byteLength > maxPortableBackupBytes
+    ) {
+      continue;
+    }
+
+    totalBytes += data.byteLength;
+    providerIcons[iconKey] = {
+      fileName,
+      dataBase64: data.toString('base64')
+    };
+  }
+
+  return providerIcons;
+}
+
+function restorePortableProviderIcons(providerIcons: Record<string, PortableProviderIcon>): void {
+  const iconsDirectory = path.join(app.getPath('userData'), 'provider-icons');
+  mkdirSync(iconsDirectory, { recursive: true });
+
+  for (const icon of Object.values(providerIcons)) {
+    writeFileSync(path.join(iconsDirectory, icon.fileName), Buffer.from(icon.dataBase64, 'base64'));
+  }
+}
+
+function getSafeCustomIconFileName(iconKey: string): string | null {
+  if (!iconKey.startsWith('custom:')) {
+    return null;
+  }
+
+  const fileName = iconKey.slice('custom:'.length);
+
+  if (
+    !fileName ||
+    fileName === '.' ||
+    fileName === '..' ||
+    path.posix.basename(fileName) !== fileName ||
+    path.win32.basename(fileName) !== fileName ||
+    sanitizeIconFileName(fileName) !== fileName
+  ) {
+    return null;
+  }
+
+  return fileName;
+}
+
+function summarizePortableBackup(backup: PortableBackupFile): PortableBackupSummary {
+  return {
+    providers: backup.data.settings.providers.length,
+    customProviderIcons: Object.keys(backup.data.providerIcons).length,
+    installedAddons: Object.keys(backup.data.addons.installedAddons).length,
+    scratchPadNotes: backup.data.scratchPad.notes.length
+  };
+}
+
 function resizePopup(size: PopupSize): FloatAISettings {
   return updateSettings({
     popup: {
@@ -1032,11 +1425,17 @@ function registerGlobalShortcut(options: { allowFallback?: boolean } = {}): stri
 
     if (ok) {
       registeredHotkey = hotkey;
+      if (isMac && app.isReady()) {
+        setupApplicationMenu();
+      }
       return hotkey;
     }
   }
 
   console.warn(`Could not register global shortcut: ${preferredHotkeys.join(', ')}`);
+  if (isMac && app.isReady()) {
+    setupApplicationMenu();
+  }
   return null;
 }
 
@@ -1066,8 +1465,7 @@ function syncLaunchAtStartup(): void {
   try {
     app.setLoginItemSettings({
       openAtLogin: settings.launchAtStartup,
-      path: process.execPath,
-      ...(isMac ? { openAsHidden: true } : {})
+      path: process.execPath
     });
   } catch (error) {
     console.warn('Could not update launch-at-login settings.', error);
@@ -1148,8 +1546,26 @@ function updateTrayAppearance(): void {
   }
 }
 
+function syncMacDockVisibility(): void {
+  if (!isMac || !app.isReady()) {
+    return;
+  }
+
+  if (settings.showTrayIcon) {
+    app.dock?.hide();
+    return;
+  }
+
+  const showDock = app.dock?.show();
+  showDock?.catch((error) => {
+    console.warn('Could not show the Dock icon after hiding the menu bar icon.', error);
+  });
+}
+
 function syncTray(): void {
-  if (!settings.showTrayIcon && !isMac) {
+  syncMacDockVisibility();
+
+  if (!settings.showTrayIcon) {
     tray?.destroy();
     tray = null;
     return;
@@ -1195,7 +1611,7 @@ function setupApplicationMenu(): void {
         submenu: [
           {
             label: 'Open Popup',
-            accelerator: macDefaultHotkey,
+            accelerator: registeredHotkey ?? settings.globalHotkey,
             click: () => showPopup({ anchorToCursor: true })
           },
           {
@@ -1291,6 +1707,8 @@ function registerIpc(): void {
   ipcMain.handle('clipboard:writeText', (_event, text: string) => {
     clipboard.writeText(text);
   });
+  ipcMain.handle('backup:export', () => exportPortableBackup());
+  ipcMain.handle('backup:import', () => importPortableBackup());
 
 }
 
@@ -1302,28 +1720,20 @@ app.on('second-instance', () => {
 
 app.on('web-contents-created', (_event, contents) => {
   if (contents.getType() === 'webview') {
-    contents.setWindowOpenHandler(() => {
+    contents.setWindowOpenHandler(({ url }) => {
+      if (!isAllowedProviderPopupUrl(url)) {
+        openExternalUrl(url);
+        return { action: 'deny' };
+      }
+
       return {
         action: 'allow',
-        overrideBrowserWindowOptions: {
-          autoHideMenuBar: true,
-          width: 800,
-          height: 800
-        }
+        overrideBrowserWindowOptions: providerPopupWindowOptions()
       };
     });
 
-    contents.on('did-create-window', (window, details) => {
-      const isAuthPopup = 
-        details.url === 'about:blank' || 
-        details.url === '' ||
-        details.disposition === 'new-window' || 
-        !!details.url.match(/oauth|login|signin|auth|accounts\.google|appleid\.apple/i);
-
-      if (!isAuthPopup) {
-        shell.openExternal(details.url);
-        window.close();
-      }
+    contents.on('did-create-window', (window) => {
+      configureProviderPopupWindow(window);
     });
 
     contents.on('before-input-event', (event, input) => {
@@ -1410,12 +1820,8 @@ function clearGuestSelection(contents: Electron.WebContents): void {
 
 app.whenReady().then(() => {
   app.userAgentFallback = app.userAgentFallback.replace(/Electron\/[\d.]+ /, '');
-  
-  if (isMac) {
-    app.dock?.hide();
-  }
 
-  settings = applyPlatformSettings(deepMergeSettings(defaultSettings, store.store as DeepPartial<FloatAISettings>));
+  settings = deepMergeSettings(platformDefaultSettings, store.store as DeepPartial<FloatAISettings>);
   store.set(settings);
   
   nativeTheme.themeSource = settings.darkMode ? 'dark' : 'light';

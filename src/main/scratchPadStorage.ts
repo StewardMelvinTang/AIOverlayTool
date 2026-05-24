@@ -59,14 +59,19 @@ export function deleteScratchPadNote(noteId: string): ScratchPadNote[] {
   return getScratchPadNotes();
 }
 
-function saveScratchPadState(nextState: ScratchPadStorageState): ScratchPadStorageState {
+export function restoreScratchPadState(value: unknown): ScratchPadNote[] {
+  saveScratchPadState(value);
+  return getScratchPadNotes();
+}
+
+function saveScratchPadState(nextState: unknown): ScratchPadStorageState {
   scratchPadState = normalizeScratchPadStorageState(nextState);
   scratchPadStore.set(scratchPadState);
   // TODO: Keep this local-first boundary so future cloud sync can layer on top without changing the panel UI.
   return scratchPadState;
 }
 
-function normalizeScratchPadStorageState(value: unknown): ScratchPadStorageState {
+export function normalizeScratchPadStorageState(value: unknown): ScratchPadStorageState {
   const input = value && typeof value === 'object' ? (value as Partial<ScratchPadStorageState>) : {};
   const notesInput = Array.isArray(input.notes) ? input.notes : [];
   const notes = notesInput.filter(isScratchPadNote);

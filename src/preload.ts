@@ -35,6 +35,8 @@ const bridge: FloatAIBridge = {
   updateScratchPadNote: (noteId, patch) => ipcRenderer.invoke('scratchpad:updateNote', noteId, patch),
   deleteScratchPadNote: (noteId) => ipcRenderer.invoke('scratchpad:deleteNote', noteId),
   copyText: (text) => ipcRenderer.invoke('clipboard:writeText', text) as Promise<void>,
+  exportPortableBackup: () => ipcRenderer.invoke('backup:export'),
+  importPortableBackup: () => ipcRenderer.invoke('backup:import'),
   onSettingsChanged: (callback: (settings: FloatAISettings) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, nextSettings: FloatAISettings) => callback(nextSettings);
     ipcRenderer.on('settings:changed', listener);

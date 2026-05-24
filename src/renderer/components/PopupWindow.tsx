@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Blocks,
+  Download,
   Edit3,
   GripVertical,
   HelpCircle,
@@ -15,6 +16,7 @@ import {
   Settings,
   Sun,
   Trash2,
+  Upload,
   X
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -26,7 +28,7 @@ import {
   type FloatAISettings,
   type Provider
 } from '../../shared/settings';
-import type { WebviewNavigationDirection } from '../../shared/bridge';
+import { providerWebSessionPartition, type WebviewNavigationDirection } from '../../shared/bridge';
 import AddonsOverlay from './addons/AddonsOverlay';
 
 type SettingsTab = 'window' | 'providers' | 'shortcut' | 'performance';
@@ -88,6 +90,8 @@ export default function PopupWindow() {
   const [hotkeyDraft, setHotkeyDraft] = useState('');
   const [hotkeyListening, setHotkeyListening] = useState(false);
   const [hotkeyError, setHotkeyError] = useState('');
+  const [backupBusy, setBackupBusy] = useState<'export' | 'import' | null>(null);
+  const [backupMessage, setBackupMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [providerDraft, setProviderDraft] = useState<ProviderDraft>(emptyProviderDraft);
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
   const [providerFormOpen, setProviderFormOpen] = useState(false);
@@ -481,6 +485,52 @@ export default function PopupWindow() {
     const nextSettings = await window.floatAI.updateSettings(patch);
     setSettings(nextSettings);
     return nextSettings;
+  }
+
+  async function handleExportBackup() {
+    setBackupBusy('export');
+    setBackupMessage(null);
+
+    try {
+      const result = await window.floatAI.exportPortableBackup();
+
+      if (!result.canceled) {
+        setBackupMessage({ kind: 'success', text: 'Backup saved.' });
+      }
+    } catch (error) {
+      setBackupMessage({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Could not export your backup.'
+      });
+    } finally {
+      setBackupBusy(null);
+    }
+  }
+
+  async function handleImportBackup() {
+    setBackupBusy('import');
+    setBackupMessage(null);
+
+    try {
+      const result = await window.floatAI.importPortableBackup();
+
+      if (!result.canceled) {
+        const nextSettings = await window.floatAI.getSettings();
+        setSettings(nextSettings);
+        setHotkeyDraft(nextSettings.globalHotkey);
+        setBackupMessage({
+          kind: 'success',
+          text: result.warnings?.length ? `Backup restored. ${result.warnings.join(' ')}` : 'Backup restored.'
+        });
+      }
+    } catch (error) {
+      setBackupMessage({
+        kind: 'error',
+        text: error instanceof Error ? error.message : 'Could not restore that backup.'
+      });
+    } finally {
+      setBackupBusy(null);
+    }
   }
 
   async function markProviderVisited(providerId: string, sourceSettings: FloatAISettings | null = settings) {
@@ -1287,7 +1337,7 @@ export default function PopupWindow() {
                 ref={(element) => setWebviewRef(provider.id, element as WebviewElement | null)}
                 className={provider.id === selectedProvider.id ? 'provider-webview active' : 'provider-webview'}
                 src={getWebviewMountUrl(provider)}
-                partition="persist:floatai-sites"
+                partition={providerWebSessionPartition}
                 allowpopups
               />
             );
@@ -1440,6 +1490,34 @@ export default function PopupWindow() {
                       onChange={(captureProtection) => persist({ privacy: { captureProtection } })}
                       tooltip="Hides FloatAI from screenshots and screen sharing where supported. Support varies by operating system and capture app."
                     />
+                    <div className="compact-field">
+                      <span>Backup</span>
+                      <div className="backup-actions">
+                        <button
+                          className="primary-button compact backup-action-button"
+                          type="button"
+                          onClick={() => void handleExportBackup()}
+                          disabled={backupBusy !== null}
+                        >
+                          <Download size={14} />
+                          {backupBusy === 'export' ? 'Saving...' : 'Backup'}
+                        </button>
+                        <button
+                          className="shortcut-listen-button backup-action-button"
+                          type="button"
+                          onClick={() => void handleImportBackup()}
+                          disabled={backupBusy !== null}
+                        >
+                          <Upload size={14} />
+                          {backupBusy === 'import' ? 'Restoring...' : 'Restore'}
+                        </button>
+                      </div>
+                    </div>
+                    {backupMessage && (
+                      <div className={`backup-inline-status ${backupMessage.kind}`} role="status">
+                        {backupMessage.text}
+                      </div>
+                    )}
                   </div>
                 </section>
               </div>

@@ -5,6 +5,9 @@ import type {
   ScratchPadNote,
   ScratchPadNotePatch
 } from './addons';
+import type { PortableBackupResult } from './backup';
+
+export const providerWebSessionPartition = 'persist:floatai-sites';
 
 export type PopupSize = {
   width: number;
@@ -47,6 +50,8 @@ export type FloatAIBridge = {
   updateScratchPadNote: (noteId: string, patch: ScratchPadNotePatch) => Promise<ScratchPadNote>;
   deleteScratchPadNote: (noteId: string) => Promise<ScratchPadNote[]>;
   copyText: (text: string) => Promise<void>;
+  exportPortableBackup: () => Promise<PortableBackupResult>;
+  importPortableBackup: () => Promise<PortableBackupResult>;
   onSettingsChanged: (callback: (settings: FloatAISettings) => void) => () => void;
   onProviderChanged: (callback: (provider: Provider) => void) => () => void;
   onOpenSettingsRequested: (callback: () => void) => () => void;
