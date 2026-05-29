@@ -25,7 +25,13 @@ import {
   type FloatAISettings,
   type Provider
 } from './shared/settings';
-import { providerWebSessionPartition, type ProviderIconPickResult, type PopupPosition, type PopupSize } from './shared/bridge';
+import {
+  providerWebSessionPartition,
+  type ProviderIconPickResult,
+  type PopupMoveDelta,
+  type PopupPosition,
+  type PopupSize
+} from './shared/bridge';
 import {
   type PortableBackupFile,
   type PortableBackupResult,
@@ -1391,6 +1397,23 @@ function resizePopup(size: PopupSize): FloatAISettings {
   });
 }
 
+function movePopupInteractive(delta: PopupMoveDelta): void {
+  if (!popupWindow || popupWindow.isDestroyed()) {
+    return;
+  }
+
+  const deltaX = Math.round(Number(delta?.deltaX ?? 0));
+  const deltaY = Math.round(Number(delta?.deltaY ?? 0));
+
+  if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || (deltaX === 0 && deltaY === 0)) {
+    return;
+  }
+
+  const bounds = popupWindow.getBounds();
+  markPopupMoving();
+  popupWindow.setBounds({ ...bounds, x: bounds.x + deltaX, y: bounds.y + deltaY }, false);
+}
+
 function broadcastSettings(): void {
   sendToPopup('settings:changed', settings);
 }
@@ -1692,7 +1715,8 @@ function registerIpc(): void {
       }
     }
   });
-  ipcMain.handle('popup:savePosition', (_event, position: PopupPosition) => savePopupPosition(position));
+  ipcMain.handle('popup:moveInteractive', (_event, delta: PopupMoveDelta) => movePopupInteractive(delta));
+  ipcMain.handle('popup:savePosition', (_event, position?: PopupPosition) => savePopupPosition(position));
   ipcMain.handle('webview:reloadAll', () => reloadAllWebviews());
   ipcMain.handle('addons:getState', () => getAddonState());
   ipcMain.handle('addons:install', (_event, addonId: string) => installAddon(addonId));

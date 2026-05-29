@@ -5,6 +5,7 @@ import {
   Blocks,
   Download,
   Edit3,
+  Gauge,
   GripVertical,
   HelpCircle,
   ImagePlus,
@@ -15,6 +16,7 @@ import {
   Save,
   Settings,
   Sun,
+  StickyNote,
   Trash2,
   Upload,
   X
@@ -29,6 +31,8 @@ import {
   type Provider
 } from '../../shared/settings';
 import { providerWebSessionPartition, type WebviewNavigationDirection } from '../../shared/bridge';
+import { getAddonManifest } from '../../shared/addonsRegistry';
+import ActiveAddonPanel from './addons/ActiveAddonPanel';
 import AddonsOverlay from './addons/AddonsOverlay';
 
 type SettingsTab = 'window' | 'providers' | 'shortcut' | 'performance';
@@ -65,6 +69,15 @@ type ProviderDragListeners = {
   cancel: (event: PointerEvent) => void;
 };
 
+type ToolbarMoveDragSession = {
+  pointerId: number;
+  startScreenX: number;
+  startScreenY: number;
+  lastScreenX: number;
+  lastScreenY: number;
+  dragging: boolean;
+};
+
 type WebviewElement = HTMLElement & {
   canGoBack: () => boolean;
   canGoForward: () => boolean;
@@ -80,11 +93,16 @@ const emptyProviderDraft: ProviderDraft = {
   icon: ''
 };
 
+const toolbarMoveDragThreshold = 4;
+const toolbarMoveClickSuppressMs = 180;
+
 export default function PopupWindow() {
   const [settings, setSettings] = useState<FloatAISettings | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState<string>('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [addonsOpen, setAddonsOpen] = useState(false);
+  const [activeAddonId, setActiveAddonId] = useState<string | null>(null);
+  const [isActiveAddonExpanded, setIsActiveAddonExpanded] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('window');
   const [loadingByProvider, setLoadingByProvider] = useState<Record<string, boolean>>({});
   const [hotkeyDraft, setHotkeyDraft] = useState('');
@@ -111,6 +129,8 @@ export default function PopupWindow() {
   const providerDragSessionRef = useRef<ProviderDragSession | null>(null);
   const providerDragListenersRef = useRef<ProviderDragListeners | null>(null);
   const providerDragFrameRef = useRef<number | undefined>(undefined);
+  const toolbarMoveDragSessionRef = useRef<ToolbarMoveDragSession | null>(null);
+  const toolbarMoveSuppressClickUntilRef = useRef(0);
   const loadedProviderIdsRef = useRef<Set<string>>(new Set());
   const selectedProviderIdRef = useRef('');
   const webviewInitialUrlsRef = useRef<Record<string, string>>({});
@@ -258,6 +278,9 @@ export default function PopupWindow() {
 
     const removeProviderListener = window.floatAI.onProviderChanged((provider) => {
       setSelectedProviderId(provider.id);
+      setActiveAddonId(null);
+      setIsActiveAddonExpanded(false);
+      setAddonsOpen(false);
     });
 
     const removeOpenSettingsListener = window.floatAI.onOpenSettingsRequested(() => {
@@ -318,6 +341,7 @@ export default function PopupWindow() {
       removeProviderDragListeners();
       cancelProviderDragFrame();
       providerDragSessionRef.current = null;
+      toolbarMoveDragSessionRef.current = null;
     };
   }, []);
 
@@ -375,6 +399,10 @@ export default function PopupWindow() {
       settings.providers[0]
     );
   }, [selectedProviderId, settings]);
+  const activeAddon = useMemo(
+    () => (activeAddonId ? getAddonManifest(activeAddonId) : undefined),
+    [activeAddonId]
+  );
 
   const providerIdsSignature = settings?.providers.map((provider) => provider.id).join('|') ?? '';
   const memorySaverEnabled = settings?.performance.memorySaver ?? true;
@@ -621,8 +649,107 @@ export default function PopupWindow() {
     setSelectedProviderId(providerId);
     setSettingsOpen(false);
     setAddonsOpen(false);
+    setActiveAddonId(null);
+    setIsActiveAddonExpanded(false);
     await window.floatAI.switchProvider(providerId);
     void markProviderVisited(providerId);
+  }
+
+  function startToolbarProviderMove(event: React.PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    hideProviderTooltip();
+    toolbarMoveDragSessionRef.current = {
+      pointerId: event.pointerId,
+      startScreenX: event.screenX,
+      startScreenY: event.screenY,
+      lastScreenX: event.screenX,
+      lastScreenY: event.screenY,
+      dragging: false
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function moveToolbarProvider(event: React.PointerEvent<HTMLButtonElement>) {
+    const session = toolbarMoveDragSessionRef.current;
+
+    if (!session || session.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const totalX = event.screenX - session.startScreenX;
+    const totalY = event.screenY - session.startScreenY;
+
+    if (!session.dragging && Math.hypot(totalX, totalY) < toolbarMoveDragThreshold) {
+      return;
+    }
+
+    session.dragging = true;
+    hideProviderTooltip();
+    event.preventDefault();
+    event.stopPropagation();
+
+    const deltaX = event.screenX - session.lastScreenX;
+    const deltaY = event.screenY - session.lastScreenY;
+    session.lastScreenX = event.screenX;
+    session.lastScreenY = event.screenY;
+
+    if (deltaX !== 0 || deltaY !== 0) {
+      window.floatAI.movePopupInteractive({ deltaX, deltaY }).catch(() => undefined);
+    }
+  }
+
+  function finishToolbarProviderMove(event: React.PointerEvent<HTMLButtonElement>) {
+    const session = toolbarMoveDragSessionRef.current;
+
+    if (!session || session.pointerId !== event.pointerId) {
+      return;
+    }
+
+    toolbarMoveDragSessionRef.current = null;
+
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (!session.dragging) {
+      return;
+    }
+
+    toolbarMoveSuppressClickUntilRef.current = Date.now() + toolbarMoveClickSuppressMs;
+    event.preventDefault();
+    event.stopPropagation();
+    window.floatAI.savePopupPosition().catch(() => undefined);
+  }
+
+  function handleProviderPillClick(providerId: string, event: React.MouseEvent<HTMLButtonElement>) {
+    if (Date.now() < toolbarMoveSuppressClickUntilRef.current) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    void handleProviderChange(providerId);
+  }
+
+  function handleOpenAddon(addonId: string) {
+    if (!getAddonManifest(addonId)) {
+      return;
+    }
+
+    setActiveAddonId(addonId);
+    setIsActiveAddonExpanded(false);
+    setAddonsOpen(false);
+    setSettingsOpen(false);
+  }
+
+  function handleUninstallAddon(addonId: string) {
+    if (activeAddonId === addonId) {
+      setActiveAddonId(null);
+      setIsActiveAddonExpanded(false);
+    }
   }
 
   function navigateWebview(direction: WebviewNavigationDirection) {
@@ -1179,9 +1306,10 @@ export default function PopupWindow() {
 
   const targetOpacity = isVisible ? settings.popup.opacity : 0;
 
+  const showRefreshButton = settings.popup.showRefreshButton && !activeAddon;
   const chromeStyle = {
     '--chrome-opacity': '1',
-    '--toolbar-action-count': settings.popup.showRefreshButton ? '3' : '2',
+    '--toolbar-action-count': showRefreshButton ? '3' : '2',
     opacity: targetOpacity,
     transition: 'opacity 0.1s ease',
     pointerEvents: isVisible ? 'auto' : 'none'
@@ -1234,6 +1362,21 @@ export default function PopupWindow() {
           >
             <Blocks size={17} />
           </button>
+          {activeAddon && (
+            <button
+              className="active-addon-pill no-drag"
+              type="button"
+              onClick={() => {
+                setAddonsOpen(false);
+                setSettingsOpen(false);
+              }}
+              aria-label={`${activeAddon.title}, active add-on`}
+              title={activeAddon.title}
+            >
+              {activeAddon.id === 'scratchpad' ? <StickyNote size={15} /> : <Gauge size={15} />}
+              <span>{activeAddon.title}</span>
+            </button>
+          )}
           <span className="provider-apps-divider" aria-hidden="true" />
           <div className={`provider-strip-wrapper ${scrollState.left ? 'mask-left' : ''} ${scrollState.right ? 'mask-right' : ''}`}>
             <div
@@ -1244,7 +1387,7 @@ export default function PopupWindow() {
               onWheel={handleWheel}
             >
               {settings.providers.map((provider) => {
-                const isActiveProvider = provider.id === selectedProvider.id;
+                const isActiveProvider = !activeAddon && provider.id === selectedProvider.id;
                 const isCompactProviderBar = settings.compactProviderBar ?? false;
                 const showProviderLabel = !isCompactProviderBar || isActiveProvider;
 
@@ -1260,7 +1403,11 @@ export default function PopupWindow() {
                     ]
                       .filter(Boolean)
                       .join(' ')}
-                    onClick={() => handleProviderChange(provider.id)}
+                    onPointerDown={startToolbarProviderMove}
+                    onPointerMove={moveToolbarProvider}
+                    onPointerUp={finishToolbarProviderMove}
+                    onPointerCancel={finishToolbarProviderMove}
+                    onClick={(event) => handleProviderPillClick(provider.id, event)}
                     onMouseEnter={(event) => showProviderTooltip(provider.id, event.currentTarget)}
                     onMouseLeave={hideProviderTooltip}
                     onFocus={(event) => showProviderTooltip(provider.id, event.currentTarget)}
@@ -1280,7 +1427,7 @@ export default function PopupWindow() {
             </div>
           </div>
         </div>
-        {settings.popup.showProviderTooltip && tooltipProvider && providerTooltip && (
+        {!activeAddon && settings.popup.showProviderTooltip && tooltipProvider && providerTooltip && (
           <div
             className={providerTooltip.visible ? 'provider-hover-card visible' : 'provider-hover-card'}
             style={{ left: providerTooltip.left }}
@@ -1293,7 +1440,7 @@ export default function PopupWindow() {
             )}
           </div>
         )}
-        {settings.popup.showRefreshButton && (
+        {showRefreshButton && (
           <button
             className="icon-button no-drag refresh-button"
             type="button"
@@ -1319,10 +1466,28 @@ export default function PopupWindow() {
           <X size={18} />
         </button>
       </header>
-      {addonsOpen && <AddonsOverlay onClose={() => setAddonsOpen(false)} />}
-      {loadingByProvider[selectedProvider.id] && <div className="webview-progress" />}
+      {addonsOpen && (
+        <AddonsOverlay
+          onClose={() => setAddonsOpen(false)}
+          onOpenAddon={handleOpenAddon}
+          onUninstallAddon={handleUninstallAddon}
+        />
+      )}
+      {!activeAddon && loadingByProvider[selectedProvider.id] && <div className="webview-progress" />}
       <main className="popup-content">
-        <div className="webview-stack">
+        {activeAddon && (
+          <section
+            className={isActiveAddonExpanded ? 'active-addon-content expanded' : 'active-addon-content'}
+            aria-label={activeAddon.title}
+          >
+            <ActiveAddonPanel
+              addonId={activeAddon.id}
+              expanded={isActiveAddonExpanded}
+              onToggleExpanded={() => setIsActiveAddonExpanded((expanded) => !expanded)}
+            />
+          </section>
+        )}
+        <div className={activeAddon ? 'webview-stack addon-hidden' : 'webview-stack'}>
           {settings.providers.map((provider) => {
             const shouldKeepLoaded =
               !memorySaverEnabled || provider.id === selectedProvider.id || loadedProviderIds.has(provider.id);

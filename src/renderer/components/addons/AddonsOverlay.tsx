@@ -12,8 +12,6 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import type { AddonDownloadTask, AddonManifest, AddonStorageState } from '../../../shared/addons';
 import { getAvailableAddonManifests } from '../../../shared/addonsRegistry';
-import ScratchPadPanel from './ScratchPadPanel';
-import SpeedTestPanel from './SpeedTestPanel';
 
 type AddonsTab = 'marketplace' | 'installed';
 
@@ -29,20 +27,23 @@ const emptyAddonState: AddonStorageState = {
 
 const availableAddons = getAvailableAddonManifests();
 
-export default function AddonsOverlay({ onClose }: { onClose: () => void }) {
+export default function AddonsOverlay({
+  onClose,
+  onOpenAddon,
+  onUninstallAddon
+}: {
+  onClose: () => void;
+  onOpenAddon: (addonId: string) => void;
+  onUninstallAddon: (addonId: string) => void;
+}) {
   const [activeTab, setActiveTab] = useState<AddonsTab>('installed');
   const [addonState, setAddonState] = useState<AddonStorageState>(emptyAddonState);
   const [downloads, setDownloads] = useState<AddonDownloadTask[]>([]);
-  const [openAddonId, setOpenAddonId] = useState<string | null>(null);
   const [busyAddonId, setBusyAddonId] = useState<string | null>(null);
   const [downloadsOpen, setDownloadsOpen] = useState(false);
   const [confirmingUninstallAddonId, setConfirmingUninstallAddonId] = useState<string | null>(null);
   const [error, setError] = useState('');
 
-  const openAddon = useMemo(
-    () => availableAddons.find((addon) => addon.id === openAddonId),
-    [openAddonId]
-  );
   const installedAddons = useMemo(
     () => availableAddons.filter((addon) => addonState.installedAddons[addon.id]),
     [addonState]
@@ -80,11 +81,6 @@ export default function AddonsOverlay({ onClose }: { onClose: () => void }) {
       event.preventDefault();
       event.stopPropagation();
 
-      if (openAddonId) {
-        setOpenAddonId(null);
-        return;
-      }
-
       if (downloadsOpen) {
         setDownloadsOpen(false);
         return;
@@ -101,7 +97,7 @@ export default function AddonsOverlay({ onClose }: { onClose: () => void }) {
 
     window.addEventListener('keydown', handleKeyDown, true);
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [activeTab, downloadsOpen, onClose, openAddonId]);
+  }, [activeTab, downloadsOpen, onClose]);
 
   async function handleInstall(addonId: string) {
     setBusyAddonId(addonId);
@@ -125,10 +121,7 @@ export default function AddonsOverlay({ onClose }: { onClose: () => void }) {
       const nextState = await window.floatAI.uninstallAddon(addonId);
       setAddonState(nextState);
       setConfirmingUninstallAddonId(null);
-
-      if (openAddonId === addonId) {
-        setOpenAddonId(null);
-      }
+      onUninstallAddon(addonId);
     } catch (uninstallError) {
       setError(uninstallError instanceof Error ? uninstallError.message : 'Could not uninstall this add-on.');
     } finally {
@@ -140,41 +133,22 @@ export default function AddonsOverlay({ onClose }: { onClose: () => void }) {
     const status = getAddonStatus(addon, addonState);
 
     if (status.primaryAction === 'open') {
-      setOpenAddonId(addon.id);
+      onOpenAddon(addon.id);
       return;
     }
 
     void handleInstall(addon.id);
   }
 
-  function renderAddonPanel(addon: AddonManifest) {
-    if (addon.id === 'scratchpad') {
-      return <ScratchPadPanel />;
-    }
-
-    if (addon.id === 'speedtest') {
-      return <SpeedTestPanel />;
-    }
-
-    return (
-      <div className="addon-empty-state">
-        <PackageCheck size={30} />
-        <strong>Add-on unavailable</strong>
-        <span>This add-on is installed but does not have a bundled panel yet.</span>
-      </div>
-    );
-  }
-
   return (
     <section className="addons-overlay" aria-label="Add-ons">
       <header className="addons-header">
         <div className="addons-heading">
-          {(openAddon || activeTab === 'marketplace') && (
+          {activeTab === 'marketplace' && (
             <button
               className="icon-button soft addons-back-button no-drag"
               type="button"
               onClick={() => {
-                setOpenAddonId(null);
                 setActiveTab('installed');
                 setDownloadsOpen(false);
                 setConfirmingUninstallAddonId(null);
@@ -186,49 +160,41 @@ export default function AddonsOverlay({ onClose }: { onClose: () => void }) {
             </button>
           )}
           <div>
-            <h1>{openAddon ? openAddon.title : activeTab === 'marketplace' ? 'Marketplace' : 'Add-ons'}</h1>
+            <h1>{activeTab === 'marketplace' ? 'Marketplace' : 'Add-ons'}</h1>
             <p>
-              {openAddon
-                ? openAddon.description
-                : activeTab === 'marketplace'
-                  ? 'Find official tools for Float AI.'
-                  : 'Installed tools'}
+              {activeTab === 'marketplace' ? 'Find official tools for Float AI.' : 'Installed tools'}
             </p>
           </div>
         </div>
         <div className="addons-header-actions">
-          {!openAddon && (
-            <>
-              <div className="addons-download-menu">
-                <button
-                  className={downloadsOpen ? 'icon-button soft active' : 'icon-button soft'}
-                  type="button"
-                  onClick={() => setDownloadsOpen((open) => !open)}
-                  title="Downloads"
-                  aria-label="Show add-on downloads"
-                >
-                  <Download size={17} />
-                </button>
-                {downloadsOpen && (
-                  <div className="addons-download-popover">
-                    <DownloadsPanel downloads={downloads} compact />
-                  </div>
-                )}
+          <div className="addons-download-menu">
+            <button
+              className={downloadsOpen ? 'icon-button soft active' : 'icon-button soft'}
+              type="button"
+              onClick={() => setDownloadsOpen((open) => !open)}
+              title="Downloads"
+              aria-label="Show add-on downloads"
+            >
+              <Download size={17} />
+            </button>
+            {downloadsOpen && (
+              <div className="addons-download-popover">
+                <DownloadsPanel downloads={downloads} compact />
               </div>
-              {activeTab !== 'marketplace' && (
-                <button
-                  className="addon-get-more-button"
-                  type="button"
-                  onClick={() => {
-                    setActiveTab('marketplace');
-                    setDownloadsOpen(false);
-                    setConfirmingUninstallAddonId(null);
-                  }}
-                >
-                  Get more add-ons
-                </button>
-              )}
-            </>
+            )}
+          </div>
+          {activeTab !== 'marketplace' && (
+            <button
+              className="addon-get-more-button"
+              type="button"
+              onClick={() => {
+                setActiveTab('marketplace');
+                setDownloadsOpen(false);
+                setConfirmingUninstallAddonId(null);
+              }}
+            >
+              Get more
+            </button>
           )}
           <button className="icon-button close-button" type="button" onClick={onClose} title="Close add-ons">
             <X size={18} />
@@ -236,55 +202,49 @@ export default function AddonsOverlay({ onClose }: { onClose: () => void }) {
         </div>
       </header>
 
-      {!openAddon && (
-        <>
-          {error && <div className="addon-error">{error}</div>}
+      {error && <div className="addon-error">{error}</div>}
 
-          <div className="addons-body">
-            {activeTab === 'marketplace' && (
-              <AddonGrid
-                addons={availableAddons}
-                addonState={addonState}
-                busyAddonId={busyAddonId}
-                confirmingUninstallAddonId={confirmingUninstallAddonId}
-                onCancelUninstall={() => setConfirmingUninstallAddonId(null)}
-                onPrimaryAction={handlePrimaryAction}
-                onRequestUninstall={(addonId) => setConfirmingUninstallAddonId(addonId)}
-                onUninstall={handleUninstall}
-              />
-            )}
+      <div className="addons-body">
+        {activeTab === 'marketplace' && (
+          <AddonGrid
+            addons={availableAddons}
+            addonState={addonState}
+            busyAddonId={busyAddonId}
+            confirmingUninstallAddonId={confirmingUninstallAddonId}
+            onCancelUninstall={() => setConfirmingUninstallAddonId(null)}
+            onPrimaryAction={handlePrimaryAction}
+            onRequestUninstall={(addonId) => setConfirmingUninstallAddonId(addonId)}
+            onUninstall={handleUninstall}
+          />
+        )}
 
-            {activeTab === 'installed' && (
-              installedAddons.length > 0 ? (
-                <InstalledAddonList
-                  addons={installedAddons}
-                  busyAddonId={busyAddonId}
-                  confirmingUninstallAddonId={confirmingUninstallAddonId}
-                  onCancelUninstall={() => setConfirmingUninstallAddonId(null)}
-                  onOpen={(addonId) => {
-                    setOpenAddonId(addonId);
-                    setConfirmingUninstallAddonId(null);
-                  }}
-                  onRequestUninstall={(addonId) => setConfirmingUninstallAddonId(addonId)}
-                  onUninstall={handleUninstall}
-                />
-              ) : (
-                <div className="addon-empty-state">
-                  <PackagePlus size={30} />
-                  <strong>No add-ons installed</strong>
-                  <span>Install ScratchPad or SpeedTest from Marketplace to pin it here.</span>
-                  <button className="primary-button compact" type="button" onClick={() => setActiveTab('marketplace')}>
-                    <PackagePlus size={15} />
-                    Get more add-ons
-                  </button>
-                </div>
-              )
-            )}
-          </div>
-        </>
-      )}
-
-      {openAddon && <div className="addon-panel-host">{renderAddonPanel(openAddon)}</div>}
+        {activeTab === 'installed' && (
+          installedAddons.length > 0 ? (
+            <InstalledAddonList
+              addons={installedAddons}
+              busyAddonId={busyAddonId}
+              confirmingUninstallAddonId={confirmingUninstallAddonId}
+              onCancelUninstall={() => setConfirmingUninstallAddonId(null)}
+              onOpen={(addonId) => {
+                onOpenAddon(addonId);
+                setConfirmingUninstallAddonId(null);
+              }}
+              onRequestUninstall={(addonId) => setConfirmingUninstallAddonId(addonId)}
+              onUninstall={handleUninstall}
+            />
+          ) : (
+            <div className="addon-empty-state">
+              <PackagePlus size={30} />
+              <strong>No add-ons installed</strong>
+              <span>Install ScratchPad or SpeedTest from Marketplace to pin it here.</span>
+              <button className="primary-button compact" type="button" onClick={() => setActiveTab('marketplace')}>
+                <PackagePlus size={15} />
+                Get more add-ons
+              </button>
+            </div>
+          )
+        )}
+      </div>
     </section>
   );
 }

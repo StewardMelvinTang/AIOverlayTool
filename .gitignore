@@ -2,6 +2,8 @@ node_modules/
 dist-electron/
 dist-renderer/
 release/
+.electron-cache/
+.electron-builder-cache/
 *.log
 .vite/
 .env

@@ -19,6 +19,11 @@ export type PopupPosition = {
   y: number;
 };
 
+export type PopupMoveDelta = {
+  deltaX: number;
+  deltaY: number;
+};
+
 export type WebviewNavigationDirection = 'back' | 'forward';
 
 export type ProviderIconPickResult = {
@@ -40,7 +45,8 @@ export type FloatAIBridge = {
   resolveProviderIcon: (icon: string) => Promise<string>;
   resizePopup: (size: PopupSize) => Promise<FloatAISettings>;
   resizePopupInteractive: (size: PopupSize) => Promise<void>;
-  savePopupPosition: (position: PopupPosition) => Promise<FloatAISettings>;
+  movePopupInteractive: (delta: PopupMoveDelta) => Promise<void>;
+  savePopupPosition: (position?: PopupPosition) => Promise<FloatAISettings>;
   getAddonState: () => Promise<AddonStorageState>;
   installAddon: (addonId: string) => Promise<AddonStorageState>;
   uninstallAddon: (addonId: string) => Promise<AddonStorageState>;
