@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   FloatAIBridge,
-  PopupMoveDelta,
   PopupPosition,
   ProviderIconPickResult,
   PopupSize,
@@ -25,7 +24,10 @@ const bridge: FloatAIBridge = {
   resolveProviderIcon: (icon: string) => ipcRenderer.invoke('provider:resolveIcon', icon) as Promise<string>,
   resizePopup: (size: PopupSize) => ipcRenderer.invoke('popup:resize', size) as Promise<FloatAISettings>,
   resizePopupInteractive: (size: PopupSize) => ipcRenderer.invoke('popup:resizeInteractive', size) as Promise<void>,
-  movePopupInteractive: (delta: PopupMoveDelta) => ipcRenderer.invoke('popup:moveInteractive', delta) as Promise<void>,
+  beginPopupMoveInteractive: () => ipcRenderer.invoke('popup:beginMoveInteractive') as Promise<void>,
+  movePopupInteractive: () => ipcRenderer.invoke('popup:moveInteractive') as Promise<void>,
+  endPopupMoveInteractive: (savePosition: boolean) =>
+    ipcRenderer.invoke('popup:endMoveInteractive', savePosition) as Promise<FloatAISettings | void>,
   savePopupPosition: (position?: PopupPosition) =>
     ipcRenderer.invoke('popup:savePosition', position) as Promise<FloatAISettings>,
   getAddonState: () => ipcRenderer.invoke('addons:getState'),

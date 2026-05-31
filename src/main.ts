@@ -28,7 +28,6 @@ import {
 import {
   providerWebSessionPartition,
   type ProviderIconPickResult,
-  type PopupMoveDelta,
   type PopupPosition,
   type PopupSize
 } from './shared/bridge';
@@ -88,10 +87,17 @@ let popupTopReassertTimers: NodeJS.Timeout[] = [];
 let popupMoveIdleTimer: NodeJS.Timeout | undefined;
 let isPopupMoving = false;
 let isPopupResizeInProgress = false;
+let popupInteractiveMoveSession: PopupInteractiveMoveSession | undefined;
 
 
 type PopupBoundsOptions = {
   anchorToCursor?: boolean;
+};
+
+type PopupInteractiveMoveSession = {
+  startCursorX: number;
+  startCursorY: number;
+  startBounds: Rectangle;
 };
 
 type WebsiteIconCandidate = {
@@ -651,6 +657,7 @@ function markPopupMoving(): void {
   popupMoveIdleTimer = setTimeout(() => {
     popupMoveIdleTimer = undefined;
     isPopupMoving = false;
+    normalizePopupSizeAfterMove();
     schedulePopupTopMostReassert();
   }, 220);
 }
@@ -661,6 +668,7 @@ function resetPopupMoving(): void {
     popupMoveIdleTimer = undefined;
   }
 
+  popupInteractiveMoveSession = undefined;
   isPopupMoving = false;
 }
 
@@ -677,7 +685,15 @@ function normalizePopupSizeAfterMove(): void {
     return;
   }
 
-  popupWindow.setSize(expectedWidth, expectedHeight, false);
+  popupWindow.setBounds(
+    {
+      x: bounds.x,
+      y: bounds.y,
+      width: expectedWidth,
+      height: expectedHeight
+    },
+    false
+  );
 }
 
 function queuePopupPositionSave(): void {
@@ -1397,21 +1413,71 @@ function resizePopup(size: PopupSize): FloatAISettings {
   });
 }
 
-function movePopupInteractive(delta: PopupMoveDelta): void {
+function getExpectedPopupBoundsAt(x: number, y: number): Rectangle {
+  return {
+    x: Math.round(x),
+    y: Math.round(y),
+    width: Math.round(settings.popup.width),
+    height: Math.round(settings.popup.height)
+  };
+}
+
+function beginPopupMoveInteractive(): void {
   if (!popupWindow || popupWindow.isDestroyed()) {
     return;
   }
 
-  const deltaX = Math.round(Number(delta?.deltaX ?? 0));
-  const deltaY = Math.round(Number(delta?.deltaY ?? 0));
+  const cursorPoint = screen.getCursorScreenPoint();
+  const bounds = popupWindow.getBounds();
+  const startBounds = getExpectedPopupBoundsAt(bounds.x, bounds.y);
 
-  if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || (deltaX === 0 && deltaY === 0)) {
+  popupInteractiveMoveSession = {
+    startCursorX: cursorPoint.x,
+    startCursorY: cursorPoint.y,
+    startBounds
+  };
+
+  markPopupMoving();
+
+  if (bounds.width !== startBounds.width || bounds.height !== startBounds.height) {
+    popupWindow.setBounds(startBounds, false);
+  }
+}
+
+function movePopupInteractive(): void {
+  if (!popupWindow || popupWindow.isDestroyed()) {
     return;
   }
 
-  const bounds = popupWindow.getBounds();
+  if (!popupInteractiveMoveSession) {
+    beginPopupMoveInteractive();
+  }
+
+  if (!popupInteractiveMoveSession) {
+    return;
+  }
+
+  const cursorPoint = screen.getCursorScreenPoint();
+  const nextBounds = getExpectedPopupBoundsAt(
+    popupInteractiveMoveSession.startBounds.x + cursorPoint.x - popupInteractiveMoveSession.startCursorX,
+    popupInteractiveMoveSession.startBounds.y + cursorPoint.y - popupInteractiveMoveSession.startCursorY
+  );
+
   markPopupMoving();
-  popupWindow.setBounds({ ...bounds, x: bounds.x + deltaX, y: bounds.y + deltaY }, false);
+  popupWindow.setBounds(nextBounds, false);
+}
+
+function endPopupMoveInteractive(shouldSavePosition: boolean): FloatAISettings | undefined {
+  popupInteractiveMoveSession = undefined;
+  normalizePopupSizeAfterMove();
+  resetPopupMoving();
+  schedulePopupTopMostReassert();
+
+  if (shouldSavePosition) {
+    return savePopupPosition();
+  }
+
+  return undefined;
 }
 
 function broadcastSettings(): void {
@@ -1715,7 +1781,11 @@ function registerIpc(): void {
       }
     }
   });
-  ipcMain.handle('popup:moveInteractive', (_event, delta: PopupMoveDelta) => movePopupInteractive(delta));
+  ipcMain.handle('popup:beginMoveInteractive', () => beginPopupMoveInteractive());
+  ipcMain.handle('popup:moveInteractive', () => movePopupInteractive());
+  ipcMain.handle('popup:endMoveInteractive', (_event, savePosition: boolean) =>
+    endPopupMoveInteractive(Boolean(savePosition))
+  );
   ipcMain.handle('popup:savePosition', (_event, position?: PopupPosition) => savePopupPosition(position));
   ipcMain.handle('webview:reloadAll', () => reloadAllWebviews());
   ipcMain.handle('addons:getState', () => getAddonState());

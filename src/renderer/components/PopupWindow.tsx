@@ -73,8 +73,6 @@ type ToolbarMoveDragSession = {
   pointerId: number;
   startScreenX: number;
   startScreenY: number;
-  lastScreenX: number;
-  lastScreenY: number;
   dragging: boolean;
 };
 
@@ -341,6 +339,9 @@ export default function PopupWindow() {
       removeProviderDragListeners();
       cancelProviderDragFrame();
       providerDragSessionRef.current = null;
+      if (toolbarMoveDragSessionRef.current) {
+        window.floatAI.endPopupMoveInteractive(false).catch(() => undefined);
+      }
       toolbarMoveDragSessionRef.current = null;
     };
   }, []);
@@ -661,12 +662,11 @@ export default function PopupWindow() {
     }
 
     hideProviderTooltip();
+    window.floatAI.beginPopupMoveInteractive().catch(() => undefined);
     toolbarMoveDragSessionRef.current = {
       pointerId: event.pointerId,
       startScreenX: event.screenX,
       startScreenY: event.screenY,
-      lastScreenX: event.screenX,
-      lastScreenY: event.screenY,
       dragging: false
     };
     event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -691,14 +691,7 @@ export default function PopupWindow() {
     event.preventDefault();
     event.stopPropagation();
 
-    const deltaX = event.screenX - session.lastScreenX;
-    const deltaY = event.screenY - session.lastScreenY;
-    session.lastScreenX = event.screenX;
-    session.lastScreenY = event.screenY;
-
-    if (deltaX !== 0 || deltaY !== 0) {
-      window.floatAI.movePopupInteractive({ deltaX, deltaY }).catch(() => undefined);
-    }
+    window.floatAI.movePopupInteractive().catch(() => undefined);
   }
 
   function finishToolbarProviderMove(event: React.PointerEvent<HTMLButtonElement>) {
@@ -715,13 +708,14 @@ export default function PopupWindow() {
     }
 
     if (!session.dragging) {
+      window.floatAI.endPopupMoveInteractive(false).catch(() => undefined);
       return;
     }
 
     toolbarMoveSuppressClickUntilRef.current = Date.now() + toolbarMoveClickSuppressMs;
     event.preventDefault();
     event.stopPropagation();
-    window.floatAI.savePopupPosition().catch(() => undefined);
+    window.floatAI.endPopupMoveInteractive(true).catch(() => undefined);
   }
 
   function handleProviderPillClick(providerId: string, event: React.MouseEvent<HTMLButtonElement>) {
