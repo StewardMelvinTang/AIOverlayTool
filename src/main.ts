@@ -1413,31 +1413,13 @@ function resizePopup(size: PopupSize): FloatAISettings {
   });
 }
 
-function getExpectedPopupBoundsAt(x: number, y: number): Rectangle {
-  return {
-    x: Math.round(x),
-    y: Math.round(y),
-    width: Math.round(settings.popup.width),
-    height: Math.round(settings.popup.height)
-  };
-}
-
-function beginPopupMoveInteractive(): void {
+function movePopupInteractive(delta: PopupMoveDelta): void {
   if (!popupWindow || popupWindow.isDestroyed()) {
     return;
   }
 
-  const cursorPoint = screen.getCursorScreenPoint();
-  const bounds = popupWindow.getBounds();
-  const startBounds = getExpectedPopupBoundsAt(bounds.x, bounds.y);
-
-  popupInteractiveMoveSession = {
-    startCursorX: cursorPoint.x,
-    startCursorY: cursorPoint.y,
-    startBounds
-  };
-
-  markPopupMoving();
+  const deltaX = Math.round(Number(delta?.deltaX ?? 0));
+  const deltaY = Math.round(Number(delta?.deltaY ?? 0));
 
   if (bounds.width !== startBounds.width || bounds.height !== startBounds.height) {
     popupWindow.setBounds(startBounds, false);
@@ -1447,10 +1429,6 @@ function beginPopupMoveInteractive(): void {
 function movePopupInteractive(): void {
   if (!popupWindow || popupWindow.isDestroyed()) {
     return;
-  }
-
-  if (!popupInteractiveMoveSession) {
-    beginPopupMoveInteractive();
   }
 
   if (!popupInteractiveMoveSession) {
@@ -1781,11 +1759,7 @@ function registerIpc(): void {
       }
     }
   });
-  ipcMain.handle('popup:beginMoveInteractive', () => beginPopupMoveInteractive());
-  ipcMain.handle('popup:moveInteractive', () => movePopupInteractive());
-  ipcMain.handle('popup:endMoveInteractive', (_event, savePosition: boolean) =>
-    endPopupMoveInteractive(Boolean(savePosition))
-  );
+  ipcMain.handle('popup:moveInteractive', (_event, delta: PopupMoveDelta) => movePopupInteractive(delta));
   ipcMain.handle('popup:savePosition', (_event, position?: PopupPosition) => savePopupPosition(position));
   ipcMain.handle('webview:reloadAll', () => reloadAllWebviews());
   ipcMain.handle('addons:getState', () => getAddonState());

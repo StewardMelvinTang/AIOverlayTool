@@ -1,4 +1,3 @@
-import SpeedTest, { type MeasurementConfig, type Results } from '@cloudflare/speedtest';
 import { Activity, AlertCircle, Clock, Play, Square, Wifi } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
@@ -11,22 +10,15 @@ type SpeedSummary = {
   testedAt: string;
 };
 
-type SpeedTestEngine = InstanceType<typeof SpeedTest>;
-
-const speedTestMeasurements: MeasurementConfig[] = [
-  { type: 'latency', numPackets: 1 },
-  { type: 'download', bytes: 1e5, count: 1, bypassMinDuration: true },
-  { type: 'latency', numPackets: 10 },
-  { type: 'download', bytes: 1e5, count: 5 },
-  { type: 'download', bytes: 1e6, count: 4 },
-  { type: 'upload', bytes: 1e5, count: 4 },
-  { type: 'upload', bytes: 1e6, count: 3 },
-  { type: 'download', bytes: 1e7, count: 2 },
-  { type: 'upload', bytes: 1e7, count: 2 }
-];
+const downloadApiUrl = 'https://speed.cloudflare.com/__down';
+const uploadApiUrl = 'https://speed.cloudflare.com/__up';
+const latencySampleCount = 4;
+const downloadSizes = [100_000, 1_000_000, 5_000_000, 10_000_000];
+const uploadSizes = [100_000, 1_000_000, 5_000_000];
 
 export default function SpeedTestPanel() {
-  const engineRef = useRef<SpeedTestEngine | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef(0);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState('Ready');
   const [progress, setProgress] = useState(0);
@@ -36,69 +28,104 @@ export default function SpeedTestPanel() {
 
   useEffect(() => {
     return () => {
-      engineRef.current?.pause();
-      engineRef.current = null;
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
     };
   }, []);
 
-  function startTest() {
+  async function startTest() {
     if (running) {
       return;
     }
 
+    const runId = runIdRef.current + 1;
+    runIdRef.current = runId;
+    abortControllerRef.current?.abort();
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     setError('');
-    setProgress(0);
-    setStatus('Preparing test');
+    setProgress(3);
+    setRunning(true);
+    setStatus('Starting test');
     setSummary(null);
-    engineRef.current?.pause();
 
-    const engine = new SpeedTest({
-      autoStart: false,
-      measurements: speedTestMeasurements,
-      measureDownloadLoadedLatency: true,
-      measureUploadLoadedLatency: true,
-      bandwidthFinishRequestDuration: 900
-    });
+    const setActiveProgress = (nextProgress: number, nextStatus: string) => {
+      if (runIdRef.current !== runId) {
+        return;
+      }
 
-    engine.onRunningChange = (isRunning) => {
-      setRunning(isRunning);
-      setStatus(isRunning ? 'Running test' : 'Test paused');
+      setProgress(Math.min(99, Math.max(0, Math.round(nextProgress))));
+      setStatus(nextStatus);
     };
 
-    engine.onPhaseChange = ({ measurement, measurementId }) => {
-      const nextProgress = Math.round(((measurementId + 1) / speedTestMeasurements.length) * 100);
-      setProgress(Math.min(96, Math.max(8, nextProgress)));
-      setStatus(formatPhase(measurement.type));
+    const setActiveSummary = (patch: Partial<SpeedSummary>) => {
+      if (runIdRef.current !== runId) {
+        return;
+      }
+
+      setSummary((current) => ({
+        testedAt: current?.testedAt ?? new Date().toISOString(),
+        ...current,
+        ...patch
+      }));
     };
 
-    engine.onResultsChange = () => {
-      setSummary(readSummary(engine.results));
-    };
+    try {
+      setActiveProgress(6, 'Checking latency');
+      const latencyPoints = await measureLatency(controller.signal, (completed, total) => {
+        setActiveProgress(6 + (completed / total) * 16, `Checking latency ${completed}/${total}`);
+      });
+      const latencyMs = percentile(latencyPoints, 0.5);
+      const jitterMs = calculateJitter(latencyPoints);
+      setActiveSummary({ latencyMs, jitterMs });
 
-    engine.onFinish = (results) => {
-      const finalSummary = readSummary(results);
+      setActiveProgress(25, 'Measuring download');
+      const downloadMbps = await measureDownload(controller.signal, (completed, total, currentMbps) => {
+        setActiveSummary({ downloadMbps: currentMbps });
+        setActiveProgress(25 + (completed / total) * 38, `Measuring download ${completed}/${total}`);
+      });
+
+      setActiveProgress(68, 'Measuring upload');
+      const uploadMbps = await measureUpload(controller.signal, (completed, total, currentMbps) => {
+        setActiveSummary({ uploadMbps: currentMbps });
+        setActiveProgress(68 + (completed / total) * 26, `Measuring upload ${completed}/${total}`);
+      });
+
+      const finalSummary: SpeedSummary = {
+        downloadMbps,
+        uploadMbps,
+        latencyMs,
+        jitterMs,
+        testedAt: new Date().toISOString()
+      };
+
       setSummary(finalSummary);
       setHistory((current) => [finalSummary, ...current].slice(0, 4));
       setProgress(100);
-      setRunning(false);
       setStatus('Finished');
-    };
+    } catch (testError) {
+      if (isAbortError(testError)) {
+        setStatus('Stopped');
+        return;
+      }
 
-    engine.onError = (message) => {
-      setError(message || 'Speed test failed. Check your network and try again.');
-      setRunning(false);
+      setError(errorMessage(testError));
       setStatus('Could not finish test');
-    };
-
-    engineRef.current = engine;
-    engine.play();
+    } finally {
+      if (runIdRef.current === runId) {
+        abortControllerRef.current = null;
+        setRunning(false);
+      }
+    }
   }
 
   function pauseTest() {
-    engineRef.current?.pause();
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
     setRunning(false);
-    setStatus('Paused');
-    // TODO: Add true request cancellation if Cloudflare exposes an abort API beyond pause().
+    setStatus('Stopped');
   }
 
   return (
@@ -190,26 +217,128 @@ function MetricCard({ label, suffix, value }: { label: string; suffix: string; v
   );
 }
 
-function readSummary(results: Results): SpeedSummary {
-  const summary = results.getSummary();
+async function measureLatency(
+  signal: AbortSignal,
+  onProgress: (completed: number, total: number) => void
+): Promise<number[]> {
+  const samples: number[] = [];
 
-  return {
-    downloadMbps: toMbps(summary.download),
-    uploadMbps: toMbps(summary.upload),
-    latencyMs: safeNumber(summary.latency),
-    jitterMs: safeNumber(summary.jitter),
-    packetLossPercent: summary.packetLoss === undefined ? undefined : safeNumber(summary.packetLoss * 100),
-    testedAt: new Date().toISOString()
-  };
+  for (let index = 0; index < latencySampleCount; index += 1) {
+    const startedAt = performance.now();
+    const response = await fetch(`${downloadApiUrl}?bytes=0&cacheBust=${cacheBust()}`, {
+      cache: 'no-store',
+      signal
+    });
+    await ensureResponse(response);
+    await response.arrayBuffer();
+    samples.push(performance.now() - startedAt);
+    onProgress(index + 1, latencySampleCount);
+  }
+
+  return samples;
 }
 
-function toMbps(value: number | undefined): number | undefined {
-  const safeValue = safeNumber(value);
-  return safeValue === undefined ? undefined : safeValue / 1_000_000;
+async function measureDownload(
+  signal: AbortSignal,
+  onProgress: (completed: number, total: number, currentMbps: number) => void
+): Promise<number> {
+  const samples: number[] = [];
+
+  for (let index = 0; index < downloadSizes.length; index += 1) {
+    const size = downloadSizes[index];
+    const startedAt = performance.now();
+    const response = await fetch(`${downloadApiUrl}?bytes=${size}&cacheBust=${cacheBust()}`, {
+      cache: 'no-store',
+      signal
+    });
+    await ensureResponse(response);
+    const payload = await response.arrayBuffer();
+    const elapsedMs = performance.now() - startedAt;
+    const measuredBytes = Math.max(payload.byteLength, size);
+    samples.push(bytesToMbps(measuredBytes, elapsedMs));
+    onProgress(index + 1, downloadSizes.length, reduceBandwidth(samples));
+  }
+
+  return reduceBandwidth(samples);
 }
 
-function safeNumber(value: number | undefined): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+async function measureUpload(
+  signal: AbortSignal,
+  onProgress: (completed: number, total: number, currentMbps: number) => void
+): Promise<number> {
+  const samples: number[] = [];
+
+  for (let index = 0; index < uploadSizes.length; index += 1) {
+    const size = uploadSizes[index];
+    const payload = new Uint8Array(size);
+    const startedAt = performance.now();
+    const response = await fetch(`${uploadApiUrl}?cacheBust=${cacheBust()}`, {
+      method: 'POST',
+      body: payload,
+      cache: 'no-store',
+      signal
+    });
+    await ensureResponse(response);
+    await response.text();
+    samples.push(bytesToMbps(size, performance.now() - startedAt));
+    onProgress(index + 1, uploadSizes.length, reduceBandwidth(samples));
+  }
+
+  return reduceBandwidth(samples);
+}
+
+async function ensureResponse(response: Response): Promise<void> {
+  if (!response.ok) {
+    throw new Error(`Cloudflare returned ${response.status}.`);
+  }
+}
+
+function bytesToMbps(bytes: number, elapsedMs: number): number {
+  if (!Number.isFinite(bytes) || !Number.isFinite(elapsedMs) || elapsedMs <= 0) {
+    return 0;
+  }
+
+  return (bytes * 8) / (elapsedMs / 1000) / 1_000_000;
+}
+
+function reduceBandwidth(samples: number[]): number {
+  return percentile(samples.filter((sample) => sample > 0), 0.8) ?? 0;
+}
+
+function percentile(values: number[], percentileValue: number): number | undefined {
+  const sortedValues = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+
+  if (sortedValues.length === 0) {
+    return undefined;
+  }
+
+  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.round((sortedValues.length - 1) * percentileValue)));
+  return sortedValues[index];
+}
+
+function calculateJitter(samples: number[]): number | undefined {
+  if (samples.length < 2) {
+    return undefined;
+  }
+
+  const deltas = samples.slice(1).map((sample, index) => Math.abs(sample - samples[index]));
+  return deltas.reduce((total, delta) => total + delta, 0) / deltas.length;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return `Speed test failed: ${error.message}`;
+  }
+
+  return 'Speed test failed. Check your network and try again.';
+}
+
+function cacheBust(): string {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function formatMbps(value: number | undefined): string {
@@ -230,16 +359,6 @@ function formatMs(value: number | undefined): string {
 
 function formatOptional(value: number | undefined, formatter: (nextValue: number | undefined) => string): string {
   return formatter(value);
-}
-
-function formatPhase(type: string): string {
-  const labels: Record<string, string> = {
-    download: 'Measuring download',
-    latency: 'Measuring latency',
-    upload: 'Measuring upload'
-  };
-
-  return labels[type] ?? 'Running test';
 }
 
 function formatTimestamp(value: string): string {

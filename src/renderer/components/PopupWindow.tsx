@@ -339,7 +339,7 @@ export default function PopupWindow() {
       removeProviderDragListeners();
       cancelProviderDragFrame();
       providerDragSessionRef.current = null;
-      if (toolbarMoveDragSessionRef.current) {
+      if (toolbarMoveDragSessionRef.current?.dragging) {
         window.floatAI.endPopupMoveInteractive(false).catch(() => undefined);
       }
       toolbarMoveDragSessionRef.current = null;
@@ -679,6 +679,14 @@ export default function PopupWindow() {
       return;
     }
 
+    if ((event.buttons & 1) !== 1) {
+      toolbarMoveDragSessionRef.current = null;
+      if (session.dragging) {
+        window.floatAI.endPopupMoveInteractive(false).catch(() => undefined);
+      }
+      return;
+    }
+
     const totalX = event.screenX - session.startScreenX;
     const totalY = event.screenY - session.startScreenY;
 
@@ -686,10 +694,18 @@ export default function PopupWindow() {
       return;
     }
 
-    session.dragging = true;
     hideProviderTooltip();
     event.preventDefault();
     event.stopPropagation();
+
+    if (!session.dragging) {
+      session.dragging = true;
+      window.floatAI
+        .beginPopupMoveInteractive()
+        .then(() => window.floatAI.movePopupInteractive())
+        .catch(() => undefined);
+      return;
+    }
 
     window.floatAI.movePopupInteractive().catch(() => undefined);
   }
@@ -716,6 +732,29 @@ export default function PopupWindow() {
     event.preventDefault();
     event.stopPropagation();
     window.floatAI.endPopupMoveInteractive(true).catch(() => undefined);
+  }
+
+  function cancelToolbarProviderMove(event: React.PointerEvent<HTMLButtonElement>) {
+    const session = toolbarMoveDragSessionRef.current;
+
+    if (!session || session.pointerId !== event.pointerId) {
+      return;
+    }
+
+    toolbarMoveDragSessionRef.current = null;
+
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (!session.dragging) {
+      return;
+    }
+
+    toolbarMoveSuppressClickUntilRef.current = Date.now() + toolbarMoveClickSuppressMs;
+    event.preventDefault();
+    event.stopPropagation();
+    window.floatAI.endPopupMoveInteractive(false).catch(() => undefined);
   }
 
   function handleProviderPillClick(providerId: string, event: React.MouseEvent<HTMLButtonElement>) {
@@ -1400,7 +1439,7 @@ export default function PopupWindow() {
                     onPointerDown={startToolbarProviderMove}
                     onPointerMove={moveToolbarProvider}
                     onPointerUp={finishToolbarProviderMove}
-                    onPointerCancel={finishToolbarProviderMove}
+                    onPointerCancel={cancelToolbarProviderMove}
                     onClick={(event) => handleProviderPillClick(provider.id, event)}
                     onMouseEnter={(event) => showProviderTooltip(provider.id, event.currentTarget)}
                     onMouseLeave={hideProviderTooltip}

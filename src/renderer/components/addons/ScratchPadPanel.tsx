@@ -1,4 +1,4 @@
-import { Check, Copy, Maximize2, Minimize2, Plus, Search, Trash2, X } from 'lucide-react';
+import { Check, ChevronLeft, Copy, Maximize2, Plus, Search, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ScratchPadNote } from '../../../shared/addons';
 
@@ -164,6 +164,11 @@ export default function ScratchPadPanel({
     }, 1400);
   }
 
+  function closeExpandedEditor() {
+    setNoteToDelete(null);
+    onToggleExpanded();
+  }
+
   return (
     <div className={expanded ? 'scratchpad-panel expanded' : 'scratchpad-panel'}>
       <aside className="scratchpad-sidebar">
@@ -209,25 +214,45 @@ export default function ScratchPadPanel({
 
       <section className="scratchpad-editor">
         <div className="scratchpad-editor-toolbar">
-          <span className={`scratchpad-save-state ${saveState}`}>
-            {selectedNote
-              ? saveState === 'saving'
-                ? 'Saving...'
-                : saveState === 'error'
-                  ? 'Save failed'
-                  : 'Saved'
-              : 'ScratchPad'}
-          </span>
-          <div className="scratchpad-editor-actions">
-            <button
-              className="icon-button soft scratchpad-expand-button"
-              type="button"
-              onClick={onToggleExpanded}
-              title={expanded ? 'Exit expanded view' : 'Expand ScratchPad'}
-              aria-label={expanded ? 'Exit expanded ScratchPad view' : 'Expand ScratchPad to fill add-on area'}
-            >
-              {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          {expanded ? (
+            <button className="scratchpad-back-button" type="button" onClick={closeExpandedEditor}>
+              <ChevronLeft size={18} />
+              Back
             </button>
+          ) : (
+            <span className={`scratchpad-save-state ${saveState}`}>
+              {selectedNote
+                ? saveState === 'saving'
+                  ? 'Saving...'
+                  : saveState === 'error'
+                    ? 'Save failed'
+                    : 'Saved'
+                : 'ScratchPad'}
+            </span>
+          )}
+          <div className="scratchpad-editor-actions">
+            {expanded && (
+              <span className={`scratchpad-save-state ${saveState}`}>
+                {selectedNote
+                  ? saveState === 'saving'
+                    ? 'Saving...'
+                    : saveState === 'error'
+                      ? 'Save failed'
+                      : 'Saved'
+                  : 'ScratchPad'}
+              </span>
+            )}
+            {!expanded && (
+              <button
+                className="icon-button soft scratchpad-expand-button"
+                type="button"
+                onClick={onToggleExpanded}
+                title="Focus editor"
+                aria-label="Focus ScratchPad editor"
+              >
+                <Maximize2 size={16} />
+              </button>
+            )}
             {selectedNote && (
               <>
                 <button
