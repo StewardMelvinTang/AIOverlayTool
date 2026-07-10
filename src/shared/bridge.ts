@@ -26,6 +26,16 @@ export type ProviderIconPickResult = {
   url: string;
 };
 
+export type QuickAskSubmitPayload = {
+  providerId: string;
+  prompt: string;
+};
+
+export type QuickAskRequest = QuickAskSubmitPayload & {
+  id: string;
+  targetUrl: string;
+};
+
 export type FloatAIBridge = {
   platform: string;
   getSettings: () => Promise<FloatAISettings>;
@@ -33,6 +43,8 @@ export type FloatAIBridge = {
   openSettings: () => Promise<void>;
   togglePopup: () => Promise<void>;
   hidePopup: () => Promise<void>;
+  hideQuickAsk: () => Promise<void>;
+  submitQuickAsk: (payload: QuickAskSubmitPayload) => Promise<void>;
   setShortcutCaptureActive: (active: boolean) => Promise<void>;
   switchProvider: (providerId: string) => Promise<Provider>;
   pickProviderIcon: () => Promise<ProviderIconPickResult | null>;
@@ -57,6 +69,8 @@ export type FloatAIBridge = {
   importPortableBackup: () => Promise<PortableBackupResult>;
   onSettingsChanged: (callback: (settings: FloatAISettings) => void) => () => void;
   onProviderChanged: (callback: (provider: Provider) => void) => () => void;
+  onQuickAskSubmitted: (callback: (request: QuickAskRequest) => void) => () => void;
+  onQuickAskAnimate: (callback: (state: 'in' | 'out') => void) => () => void;
   onOpenSettingsRequested: (callback: () => void) => () => void;
   onWebviewNavigation: (callback: (direction: WebviewNavigationDirection) => void) => () => void;
   onAnimate: (callback: (state: 'in' | 'out') => void) => () => void;

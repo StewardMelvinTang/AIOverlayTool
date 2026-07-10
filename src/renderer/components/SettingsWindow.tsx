@@ -27,6 +27,7 @@ type ProviderDraft = {
   name: string;
   url: string;
   icon: string;
+  alwaysActive: boolean;
 };
 
 const sections: Array<{ id: SectionId; label: string; icon: typeof Settings2 }> = [
@@ -40,7 +41,8 @@ const sections: Array<{ id: SectionId; label: string; icon: typeof Settings2 }> 
 const emptyDraft: ProviderDraft = {
   name: '',
   url: '',
-  icon: ''
+  icon: '',
+  alwaysActive: false
 };
 
 export default function SettingsWindow() {
@@ -101,7 +103,8 @@ export default function SettingsWindow() {
     setProviderDraft({
       name: provider.name,
       url: provider.url,
-      icon: provider.icon
+      icon: provider.icon,
+      alwaysActive: provider.alwaysActive
     });
     setProviderError('');
   }
@@ -114,7 +117,8 @@ export default function SettingsWindow() {
     const trimmedDraft = {
       name: providerDraft.name.trim(),
       url: providerDraft.url.trim(),
-      icon: providerDraft.icon.trim() || 'spark'
+      icon: providerDraft.icon.trim() || 'spark',
+      alwaysActive: providerDraft.alwaysActive
     };
 
     if (!trimmedDraft.name) {
@@ -346,6 +350,11 @@ export default function SettingsWindow() {
                   placeholder="spark"
                 />
               </FieldRow>
+              <ToggleRow
+                label="Always Active"
+                checked={providerDraft.alwaysActive}
+                onChange={(alwaysActive) => setProviderDraft({ ...providerDraft, alwaysActive })}
+              />
               {providerError && <div className="form-error">{providerError}</div>}
               <button type="button" className="primary-button" onClick={saveProvider}>
                 {editingProviderId ? <Save size={16} /> : <Plus size={16} />}

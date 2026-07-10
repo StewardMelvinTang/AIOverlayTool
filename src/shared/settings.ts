@@ -3,7 +3,12 @@ export type Provider = {
   name: string;
   url: string;
   icon: string;
+  alwaysActive: boolean;
   lastVisitedAt?: string;
+};
+
+type ProviderCandidate = Omit<Provider, 'alwaysActive'> & {
+  alwaysActive?: unknown;
 };
 
 export type PopupSettings = {
@@ -27,6 +32,11 @@ export type ClipboardSettings = {
   autoPaste: boolean;
 };
 
+export type QuickAskSettings = {
+  hotkey: string;
+  providerId: string;
+};
+
 export type PrivacySettings = {
   captureProtection: boolean;
 };
@@ -44,6 +54,7 @@ export type FloatAISettings = {
   showTrayIcon: boolean;
   popup: PopupSettings;
   providers: Provider[];
+  quickAsk: QuickAskSettings;
   clipboard: ClipboardSettings;
   privacy: PrivacySettings;
   performance: PerformanceSettings;
@@ -66,23 +77,27 @@ export const builtInProviders: Provider[] = [
     id: 'chatgpt',
     name: 'ChatGPT',
     url: 'https://chatgpt.com',
-    icon: 'chatgpt'
+    icon: 'chatgpt',
+    alwaysActive: false
   },
   {
     id: 'claude',
     name: 'Claude',
     url: 'https://claude.ai',
-    icon: 'claude'
+    icon: 'claude',
+    alwaysActive: false
   },
   {
     id: 'gemini',
     name: 'Gemini',
     url: 'https://gemini.google.com',
-    icon: 'gemini'
+    icon: 'gemini',
+    alwaysActive: false
   }
 ];
 
 export const builtInProviderIds = builtInProviders.map((provider) => provider.id);
+export const quickAskProviderIds = ['chatgpt', 'claude', 'gemini'];
 
 const legacyDefaultProviderIds = new Set(['perplexity', 'copilot']);
 const legacyDefaultProviderUrls = new Map([
@@ -111,6 +126,10 @@ export const defaultSettings: FloatAISettings = {
     showProviderTooltipLastVisited: true
   },
   providers: builtInProviders,
+  quickAsk: {
+    hotkey: 'Alt+Shift+K',
+    providerId: 'chatgpt'
+  },
   clipboard: {
     copySelectedTextBeforeOpen: false,
     autoPaste: false
@@ -133,6 +152,10 @@ export function isBuiltInProvider(providerId: string): boolean {
   return builtInProviderIds.includes(providerId);
 }
 
+export function isQuickAskProvider(providerId: string): boolean {
+  return quickAskProviderIds.includes(providerId);
+}
+
 export function createProviderId(name: string): string {
   const normalized = name
     .trim()
@@ -152,7 +175,7 @@ export function isHttpUrl(value: string): boolean {
   }
 }
 
-function isProvider(value: unknown): value is Provider {
+function isProvider(value: unknown): value is ProviderCandidate {
   if (!value || typeof value !== 'object') {
     return false;
   }
@@ -169,7 +192,12 @@ function isProvider(value: unknown): value is Provider {
 }
 
 export function normalizeProviders(providers: unknown): Provider[] {
-  const userProviders = Array.isArray(providers) ? providers.filter(isProvider) : [];
+  const userProviders = Array.isArray(providers)
+    ? providers.filter(isProvider).map((provider) => ({
+        ...provider,
+        alwaysActive: provider.alwaysActive === true
+      }))
+    : [];
   const migratedProviders = userProviders.filter((provider) => !isLegacyDefaultProvider(provider));
   return migratedProviders.length > 0 ? migratedProviders : builtInProviders;
 }
@@ -179,10 +207,14 @@ export function normalizeSettings(value: unknown): FloatAISettings {
   const providers = normalizeProviders(input.providers);
   const defaultProviderExists = providers.some((provider) => provider.id === input.defaultProviderId);
   const fallbackProviderId = providers[0]?.id ?? defaultSettings.defaultProviderId;
+  const quickAskProviderId =
+    providers.find((provider) => provider.id === input.quickAsk?.providerId && isQuickAskProvider(provider.id))?.id ??
+    providers.find((provider) => isQuickAskProvider(provider.id))?.id ??
+    fallbackProviderId;
 
   return {
     defaultProviderId: defaultProviderExists ? input.defaultProviderId! : fallbackProviderId,
-    globalHotkey: normalizeHotkey(input.globalHotkey),
+    globalHotkey: normalizeHotkey(input.globalHotkey, defaultSettings.globalHotkey),
     launchAtStartup:
       typeof input.launchAtStartup === 'boolean' ? input.launchAtStartup : defaultSettings.launchAtStartup,
     showTrayIcon: typeof input.showTrayIcon === 'boolean' ? input.showTrayIcon : defaultSettings.showTrayIcon,
@@ -218,6 +250,12 @@ export function normalizeSettings(value: unknown): FloatAISettings {
           : defaultSettings.popup.showProviderTooltipLastVisited
     },
     providers,
+    quickAsk: {
+      ...defaultSettings.quickAsk,
+      ...(input.quickAsk ?? {}),
+      hotkey: normalizeHotkey(input.quickAsk?.hotkey, defaultSettings.quickAsk.hotkey),
+      providerId: quickAskProviderId
+    },
     clipboard: {
       ...defaultSettings.clipboard,
       ...(input.clipboard ?? {}),
@@ -298,7 +336,11 @@ export function deepMergeSettings(
       ...current.performance,
       ...(patch.performance ?? {})
     },
-    providers: patch.providers ?? current.providers
+    providers: patch.providers ?? current.providers,
+    quickAsk: {
+      ...current.quickAsk,
+      ...(patch.quickAsk ?? {})
+    }
   });
 }
 
@@ -326,9 +368,9 @@ function isLegacyDefaultProvider(provider: Provider): boolean {
   return legacyDefaultProviderIds.has(provider.id) && legacyDefaultProviderUrls.get(provider.id) === provider.url;
 }
 
-function normalizeHotkey(value: unknown): string {
+function normalizeHotkey(value: unknown, fallback: string): string {
   if (typeof value !== 'string' || !value.trim()) {
-    return defaultSettings.globalHotkey;
+    return fallback;
   }
 
   return value.trim();

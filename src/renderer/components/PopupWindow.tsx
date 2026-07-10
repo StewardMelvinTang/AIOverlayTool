@@ -30,7 +30,7 @@ import {
   type FloatAISettings,
   type Provider
 } from '../../shared/settings';
-import { providerWebSessionPartition, type WebviewNavigationDirection } from '../../shared/bridge';
+import { providerWebSessionPartition, type QuickAskRequest, type WebviewNavigationDirection } from '../../shared/bridge';
 import { getAddonManifest } from '../../shared/addonsRegistry';
 import ActiveAddonPanel from './addons/ActiveAddonPanel';
 import AddonsOverlay from './addons/AddonsOverlay';
@@ -41,6 +41,7 @@ type ProviderDraft = {
   name: string;
   url: string;
   icon: string;
+  alwaysActive: boolean;
 };
 
 type ProviderTooltipState = {
@@ -82,13 +83,16 @@ type WebviewElement = HTMLElement & {
   getURL: () => string;
   goBack: () => void;
   goForward: () => void;
+  loadURL: (url: string) => Promise<void> | void;
   reload: () => void;
+  executeJavaScript: (code: string, userGesture?: boolean) => Promise<unknown>;
 };
 
 const emptyProviderDraft: ProviderDraft = {
   name: '',
   url: '',
-  icon: ''
+  icon: '',
+  alwaysActive: false
 };
 
 const toolbarMoveDragThreshold = 4;
@@ -106,6 +110,9 @@ export default function PopupWindow() {
   const [hotkeyDraft, setHotkeyDraft] = useState('');
   const [hotkeyListening, setHotkeyListening] = useState(false);
   const [hotkeyError, setHotkeyError] = useState('');
+  const [quickAskHotkeyDraft, setQuickAskHotkeyDraft] = useState('');
+  const [quickAskHotkeyListening, setQuickAskHotkeyListening] = useState(false);
+  const [quickAskHotkeyError, setQuickAskHotkeyError] = useState('');
   const [backupBusy, setBackupBusy] = useState<'export' | 'import' | null>(null);
   const [backupMessage, setBackupMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [providerDraft, setProviderDraft] = useState<ProviderDraft>(emptyProviderDraft);
@@ -130,8 +137,12 @@ export default function PopupWindow() {
   const toolbarMoveDragSessionRef = useRef<ToolbarMoveDragSession | null>(null);
   const toolbarMoveSuppressClickUntilRef = useRef(0);
   const loadedProviderIdsRef = useRef<Set<string>>(new Set());
+  const alwaysActiveProviderIdsRef = useRef<Set<string>>(new Set());
   const selectedProviderIdRef = useRef('');
   const webviewInitialUrlsRef = useRef<Record<string, string>>({});
+  const pendingQuickAskRef = useRef<QuickAskRequest | null>(null);
+  const quickAskAttemptCountRef = useRef<Record<string, number>>({});
+  const quickAskRetryTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
   const [loadedProviderIds, setLoadedProviderIds] = useState<Set<string>>(() => new Set());
   const providerStripRef = useRef<HTMLDivElement>(null);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
@@ -204,7 +215,7 @@ export default function PopupWindow() {
   }
 
   function unloadProvider(providerId: string) {
-    if (selectedProviderIdRef.current === providerId) {
+    if (selectedProviderIdRef.current === providerId || alwaysActiveProviderIdsRef.current.has(providerId)) {
       return;
     }
 
@@ -224,7 +235,7 @@ export default function PopupWindow() {
   function scheduleProviderUnload(providerId: string, unloadMinutes: number) {
     clearUnloadTimer(providerId);
 
-    if (selectedProviderIdRef.current === providerId) {
+    if (selectedProviderIdRef.current === providerId || alwaysActiveProviderIdsRef.current.has(providerId)) {
       return;
     }
 
@@ -262,6 +273,8 @@ export default function PopupWindow() {
       setSelectedProviderId(nextSettings.defaultProviderId);
       setHotkeyDraft(nextSettings.globalHotkey);
       setHotkeyError('');
+      setQuickAskHotkeyDraft(nextSettings.quickAsk.hotkey);
+      setQuickAskHotkeyError('');
       void markProviderVisited(nextSettings.defaultProviderId, nextSettings);
     });
 
@@ -269,6 +282,8 @@ export default function PopupWindow() {
       setSettings(nextSettings);
       setHotkeyDraft((current) => current || nextSettings.globalHotkey);
       setHotkeyError('');
+      setQuickAskHotkeyDraft((current) => current || nextSettings.quickAsk.hotkey);
+      setQuickAskHotkeyError('');
       setSelectedProviderId((current) =>
         nextSettings.providers.some((provider) => provider.id === current) ? current : nextSettings.defaultProviderId
       );
@@ -303,6 +318,10 @@ export default function PopupWindow() {
       }
     });
 
+    const removeQuickAskListener = window.floatAI.onQuickAskSubmitted((request) => {
+      handleQuickAskSubmitted(request);
+    });
+
     const handleMouseNavigation = (event: MouseEvent) => {
       if (event.button === 3) {
         event.preventDefault();
@@ -325,6 +344,7 @@ export default function PopupWindow() {
       removeNavigationListener();
       removeAnimateListener();
       removeReloadListener();
+      removeQuickAskListener();
       window.removeEventListener('mouseup', handleMouseNavigation);
       for (const cleanup of Object.values(webviewCleanupRefs.current)) {
         cleanup?.();
@@ -332,6 +352,11 @@ export default function PopupWindow() {
       webviewCleanupRefs.current = {};
       for (const providerId of Object.keys(unloadTimersRef.current)) {
         clearUnloadTimer(providerId);
+      }
+      for (const timer of Object.values(quickAskRetryTimersRef.current)) {
+        if (timer) {
+          clearTimeout(timer);
+        }
       }
       if (providerTooltipTimerRef.current) {
         clearTimeout(providerTooltipTimerRef.current);
@@ -347,7 +372,9 @@ export default function PopupWindow() {
   }, []);
 
   useEffect(() => {
-    if (!hotkeyListening) {
+    const activeCapture = hotkeyListening ? 'global' : quickAskHotkeyListening ? 'quickAsk' : null;
+
+    if (!activeCapture) {
       return undefined;
     }
 
@@ -357,29 +384,41 @@ export default function PopupWindow() {
 
       if (event.key === 'Escape') {
         setHotkeyListening(false);
+        setQuickAskHotkeyListening(false);
         setHotkeyError('');
+        setQuickAskHotkeyError('');
         return;
       }
 
       const captured = acceleratorFromKeyboardEvent(event, isMac);
 
       if (!captured.accelerator) {
-        setHotkeyError(captured.error ?? 'Press a complete shortcut.');
+        if (activeCapture === 'global') {
+          setHotkeyError(captured.error ?? 'Press a complete shortcut.');
+        } else {
+          setQuickAskHotkeyError(captured.error ?? 'Press a complete shortcut.');
+        }
         return;
       }
 
-      setHotkeyDraft(captured.accelerator);
-      setHotkeyError('');
-      setHotkeyListening(false);
+      if (activeCapture === 'global') {
+        setHotkeyDraft(captured.accelerator);
+        setHotkeyError('');
+        setHotkeyListening(false);
+      } else {
+        setQuickAskHotkeyDraft(captured.accelerator);
+        setQuickAskHotkeyError('');
+        setQuickAskHotkeyListening(false);
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown, true);
 
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [hotkeyListening, isMac]);
+  }, [hotkeyListening, quickAskHotkeyListening, isMac]);
 
   useEffect(() => {
-    if (!hotkeyListening) {
+    if (!hotkeyListening && !quickAskHotkeyListening) {
       window.floatAI.setShortcutCaptureActive(false).catch(() => undefined);
       return undefined;
     }
@@ -387,7 +426,7 @@ export default function PopupWindow() {
     return () => {
       window.floatAI.setShortcutCaptureActive(false).catch(() => undefined);
     };
-  }, [hotkeyListening]);
+  }, [hotkeyListening, quickAskHotkeyListening]);
 
   const selectedProvider = useMemo<Provider | undefined>(() => {
     if (!settings) {
@@ -405,7 +444,8 @@ export default function PopupWindow() {
     [activeAddonId]
   );
 
-  const providerIdsSignature = settings?.providers.map((provider) => provider.id).join('|') ?? '';
+  const providerMemorySignature =
+    settings?.providers.map((provider) => `${provider.id}:${provider.alwaysActive ? 1 : 0}`).join('|') ?? '';
   const memorySaverEnabled = settings?.performance.memorySaver ?? true;
   const memorySaverUnloadMinutes = settings?.performance.memorySaverUnloadMinutes ?? 2;
 
@@ -419,9 +459,13 @@ export default function PopupWindow() {
     }
 
     const providerIds = new Set(settings.providers.map((provider) => provider.id));
+    const alwaysActiveProviderIds = new Set(
+      settings.providers.filter((provider) => provider.alwaysActive).map((provider) => provider.id)
+    );
+    alwaysActiveProviderIdsRef.current = alwaysActiveProviderIds;
 
     for (const providerId of Object.keys(unloadTimersRef.current)) {
-      if (!providerIds.has(providerId)) {
+      if (!providerIds.has(providerId) || alwaysActiveProviderIds.has(providerId)) {
         clearUnloadTimer(providerId);
       }
     }
@@ -448,6 +492,10 @@ export default function PopupWindow() {
     }
 
     clearUnloadTimer(selectedProvider.id);
+    for (const providerId of alwaysActiveProviderIds) {
+      clearUnloadTimer(providerId);
+    }
+
     updateLoadedProviders((current) => {
       current.add(selectedProvider.id);
       for (const providerId of Array.from(current)) {
@@ -459,11 +507,15 @@ export default function PopupWindow() {
     });
 
     for (const providerId of Array.from(loadedProviderIdsRef.current)) {
-      if (providerId !== selectedProvider.id && providerIds.has(providerId)) {
+      if (
+        providerId !== selectedProvider.id &&
+        providerIds.has(providerId) &&
+        !alwaysActiveProviderIds.has(providerId)
+      ) {
         scheduleProviderUnload(providerId, memorySaverUnloadMinutes);
       }
     }
-  }, [memorySaverEnabled, memorySaverUnloadMinutes, providerIdsSignature, selectedProvider?.id, settings]);
+  }, [memorySaverEnabled, memorySaverUnloadMinutes, providerMemorySignature, selectedProvider?.id]);
 
   const providerIconSignature =
     settings?.providers.map((provider) => `${provider.id}:${provider.icon}`).join('|') ?? '';
@@ -624,8 +676,36 @@ export default function PopupWindow() {
     }
   }
 
+  async function saveQuickAskHotkeyDraft() {
+    if (!settings) {
+      return;
+    }
+
+    const normalizedHotkey = normalizeAcceleratorText(quickAskHotkeyDraft, isMac) || settings.quickAsk.hotkey;
+    const validationError = validateAcceleratorText(normalizedHotkey);
+
+    if (validationError) {
+      setQuickAskHotkeyError(validationError);
+      return;
+    }
+
+    try {
+      const nextSettings = await persist({
+        quickAsk: {
+          hotkey: normalizedHotkey
+        }
+      });
+      setQuickAskHotkeyDraft(nextSettings.quickAsk.hotkey);
+      setQuickAskHotkeyListening(false);
+      setQuickAskHotkeyError('');
+    } catch (error) {
+      setQuickAskHotkeyError(error instanceof Error ? error.message : 'Could not register this shortcut.');
+    }
+  }
+
   async function startHotkeyListening() {
     setHotkeyError('');
+    setQuickAskHotkeyListening(false);
 
     try {
       await window.floatAI.setShortcutCaptureActive(true);
@@ -633,6 +713,19 @@ export default function PopupWindow() {
     } catch {
       setHotkeyListening(false);
       setHotkeyError('Could not pause the current shortcut. Please try listening again.');
+    }
+  }
+
+  async function startQuickAskHotkeyListening() {
+    setQuickAskHotkeyError('');
+    setHotkeyListening(false);
+
+    try {
+      await window.floatAI.setShortcutCaptureActive(true);
+      setQuickAskHotkeyListening(true);
+    } catch {
+      setQuickAskHotkeyListening(false);
+      setQuickAskHotkeyError('Could not pause the current shortcut. Please try listening again.');
     }
   }
 
@@ -813,6 +906,98 @@ export default function PopupWindow() {
     void markProviderVisited(selectedProviderId);
   }
 
+  function handleQuickAskSubmitted(request: QuickAskRequest) {
+    if (selectedProviderIdRef.current) {
+      rememberProviderUrl(selectedProviderIdRef.current);
+    }
+
+    pendingQuickAskRef.current = request;
+    quickAskAttemptCountRef.current[request.id] = 0;
+    providerLastUrlsRef.current[request.providerId] = request.targetUrl;
+    webviewInitialUrlsRef.current[request.providerId] = request.targetUrl;
+    clearUnloadTimer(request.providerId);
+    setSettingsOpen(false);
+    setAddonsOpen(false);
+    setActiveAddonId(null);
+    setIsActiveAddonExpanded(false);
+    setSelectedProviderId(request.providerId);
+    setLoadingByProvider((current) => ({
+      ...current,
+      [request.providerId]: true
+    }));
+    updateLoadedProviders((current) => {
+      current.add(request.providerId);
+      return current;
+    });
+    navigateProviderToQuickAsk(request);
+  }
+
+  function navigateProviderToQuickAsk(request: QuickAskRequest) {
+    const webview = webviewRefs.current[request.providerId];
+
+    if (webview && typeof webview.loadURL === 'function') {
+      try {
+        const result = webview.loadURL(request.targetUrl);
+
+        if (result && typeof (result as Promise<void>).catch === 'function') {
+          (result as Promise<void>).catch(() => undefined);
+        }
+      } catch {
+        // React will still push the new src prop for newly mounted webviews.
+      }
+    }
+
+    scheduleQuickAskSubmitAttempt(request.providerId, 650);
+  }
+
+  function scheduleQuickAskSubmitAttempt(providerId: string, delayMs = 0) {
+    const existingTimer = quickAskRetryTimersRef.current[providerId];
+
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    quickAskRetryTimersRef.current[providerId] = setTimeout(() => {
+      quickAskRetryTimersRef.current[providerId] = undefined;
+      attemptQuickAskSubmission(providerId);
+    }, delayMs);
+  }
+
+  function attemptQuickAskSubmission(providerId: string) {
+    const request = pendingQuickAskRef.current;
+    const webview = webviewRefs.current[providerId];
+
+    if (!request || request.providerId !== providerId || !webview || typeof webview.executeJavaScript !== 'function') {
+      return;
+    }
+
+    const attemptCount = quickAskAttemptCountRef.current[request.id] ?? 0;
+
+    if (attemptCount >= 14) {
+      pendingQuickAskRef.current = null;
+      delete quickAskAttemptCountRef.current[request.id];
+      return;
+    }
+
+    quickAskAttemptCountRef.current[request.id] = attemptCount + 1;
+    webview
+      .executeJavaScript(createQuickAskInjectionScript(request.prompt), true)
+      .then((result) => {
+        const scriptResult = result as { ok?: boolean; inserted?: boolean; sent?: boolean } | null;
+
+        if (scriptResult?.ok && scriptResult.sent) {
+          pendingQuickAskRef.current = null;
+          delete quickAskAttemptCountRef.current[request.id];
+          return;
+        }
+
+        scheduleQuickAskSubmitAttempt(providerId, 420);
+      })
+      .catch(() => {
+        scheduleQuickAskSubmitAttempt(providerId, 520);
+      });
+  }
+
   function showProviderTooltip(providerId: string, target: HTMLElement) {
     if (!settings?.popup.showProviderTooltip) {
       return;
@@ -869,7 +1054,8 @@ export default function PopupWindow() {
     setProviderDraft({
       name: provider.name,
       url: provider.url,
-      icon: provider.icon
+      icon: provider.icon,
+      alwaysActive: provider.alwaysActive
     });
     setProviderError('');
     setAutoIconLoading(false);
@@ -923,7 +1109,8 @@ export default function PopupWindow() {
     const trimmedDraft = {
       name: providerDraft.name.trim(),
       url: providerDraft.url.trim(),
-      icon: providerDraft.icon.trim() || providerDraft.name.trim().toLowerCase()
+      icon: providerDraft.icon.trim() || providerDraft.name.trim().toLowerCase(),
+      alwaysActive: providerDraft.alwaysActive
     };
 
     if (!trimmedDraft.name) {
@@ -1251,6 +1438,7 @@ export default function PopupWindow() {
     const handleStartLoading = () => setProviderLoading(true);
     const handleStopLoading = () => setProviderLoading(false);
     const handleNavigation = () => rememberProviderUrl(providerId);
+    const handleQuickAskReady = () => scheduleQuickAskSubmitAttempt(providerId, 180);
 
     element.addEventListener('did-start-loading', handleStartLoading);
     element.addEventListener('did-stop-loading', handleStopLoading);
@@ -1258,6 +1446,8 @@ export default function PopupWindow() {
     element.addEventListener('did-navigate', handleNavigation);
     element.addEventListener('did-navigate-in-page', handleNavigation);
     element.addEventListener('dom-ready', handleNavigation);
+    element.addEventListener('dom-ready', handleQuickAskReady);
+    element.addEventListener('did-stop-loading', handleQuickAskReady);
 
     webviewCleanupRefs.current[providerId] = () => {
       rememberProviderUrl(providerId);
@@ -1267,6 +1457,8 @@ export default function PopupWindow() {
       element.removeEventListener('did-navigate', handleNavigation);
       element.removeEventListener('did-navigate-in-page', handleNavigation);
       element.removeEventListener('dom-ready', handleNavigation);
+      element.removeEventListener('dom-ready', handleQuickAskReady);
+      element.removeEventListener('did-stop-loading', handleQuickAskReady);
     };
   }
 
@@ -1352,6 +1544,9 @@ export default function PopupWindow() {
     : undefined;
   const normalizedHotkeyDraft = normalizeAcceleratorText(hotkeyDraft, isMac);
   const hotkeyHasChanges = Boolean(normalizedHotkeyDraft) && normalizedHotkeyDraft !== settings.globalHotkey;
+  const normalizedQuickAskHotkeyDraft = normalizeAcceleratorText(quickAskHotkeyDraft, isMac);
+  const quickAskHotkeyHasChanges =
+    Boolean(normalizedQuickAskHotkeyDraft) && normalizedQuickAskHotkeyDraft !== settings.quickAsk.hotkey;
 
   return (
     <div
@@ -1523,7 +1718,9 @@ export default function PopupWindow() {
         <div className={activeAddon ? 'webview-stack addon-hidden' : 'webview-stack'}>
           {settings.providers.map((provider) => {
             const shouldKeepLoaded =
-              !memorySaverEnabled || provider.id === selectedProvider.id || loadedProviderIds.has(provider.id);
+              !memorySaverEnabled ||
+              provider.id === selectedProvider.id ||
+              loadedProviderIds.has(provider.id);
 
             if (!shouldKeepLoaded) {
               return null;
@@ -1834,6 +2031,48 @@ export default function PopupWindow() {
                   </div>
                 </div>
                 {hotkeyError && <div className="shortcut-error">{hotkeyError}</div>}
+                <div className={quickAskHotkeyListening ? 'compact-field shortcut-field listening' : 'compact-field shortcut-field'}>
+                  <span>Quick Ask</span>
+                  <div className="shortcut-control">
+                    <input
+                      className="input"
+                      value={quickAskHotkeyListening ? 'Listening...' : quickAskHotkeyDraft}
+                      onChange={(event) => {
+                        setQuickAskHotkeyDraft(event.target.value);
+                        setQuickAskHotkeyError('');
+                      }}
+                      readOnly={quickAskHotkeyListening}
+                      placeholder={isMac ? 'Command+Shift+K' : 'Alt+Shift+K'}
+                    />
+                    <div className="shortcut-actions">
+                      <button
+                        className={quickAskHotkeyListening ? 'shortcut-listen-button active' : 'shortcut-listen-button'}
+                        type="button"
+                        onClick={() => {
+                          setQuickAskHotkeyError('');
+                          if (quickAskHotkeyListening) {
+                            setQuickAskHotkeyListening(false);
+                          } else {
+                            void startQuickAskHotkeyListening();
+                          }
+                        }}
+                      >
+                        {quickAskHotkeyListening ? <X size={16} /> : <Keyboard size={16} />}
+                        {quickAskHotkeyListening ? 'Cancel' : 'Listen'}
+                      </button>
+                      <button
+                        className="primary-button compact"
+                        type="button"
+                        onClick={saveQuickAskHotkeyDraft}
+                        disabled={quickAskHotkeyListening || !quickAskHotkeyHasChanges}
+                      >
+                        <Save size={16} />
+                        Apply
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {quickAskHotkeyError && <div className="shortcut-error">{quickAskHotkeyError}</div>}
                 <CompactToggleRow
                   label={isMac ? 'Cmd +/- to zoom' : 'Ctrl +/- to zoom'}
                   checked={settings.enableZoomShortcuts}
@@ -1905,6 +2144,14 @@ export default function PopupWindow() {
                       placeholder="https://chatgpt.com"
                     />
                   </div>
+                  <CompactToggleRow
+                    label="Always Active"
+                    checked={providerDraft.alwaysActive}
+                    onChange={(alwaysActive) =>
+                      setProviderDraft((currentDraft) => ({ ...currentDraft, alwaysActive }))
+                    }
+                    tooltip="Keep this provider loaded while Memory Saver is on, so music and other background activity continue. This provider will use more memory."
+                  />
                   <div>
                     <label className="field-label">Icon</label>
                     <div className="icon-picker-row">
@@ -1913,7 +2160,8 @@ export default function PopupWindow() {
                           id: 'draft',
                           name: providerDraft.name || 'Provider',
                           url: providerDraft.url || 'https://example.com',
-                          icon: providerDraft.icon
+                          icon: providerDraft.icon,
+                          alwaysActive: providerDraft.alwaysActive
                         }}
                         iconUrl={draftIconUrl}
                       />
@@ -2212,6 +2460,99 @@ function formatLastVisited(lastVisitedAt?: string): string {
   }
 
   return `last visited ${days} ${days === 1 ? 'day' : 'days'} ago`;
+}
+
+function createQuickAskInjectionScript(prompt: string): string {
+  return `
+    (() => {
+      const prompt = ${JSON.stringify(prompt)};
+      const isVisible = (element) => {
+        if (!element || !(element instanceof HTMLElement)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const readText = (element) => {
+        if ('value' in element && typeof element.value === 'string') return element.value;
+        return element.textContent || '';
+      };
+      const dispatchTextEvents = (element) => {
+        element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      const setPlainInputValue = (element) => {
+        const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+        if (descriptor && descriptor.set) {
+          descriptor.set.call(element, prompt);
+        } else {
+          element.value = prompt;
+        }
+        dispatchTextEvents(element);
+      };
+      const setEditableValue = (element) => {
+        element.focus();
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        range.collapse(false);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+
+        if (!document.execCommand('insertText', false, prompt)) {
+          element.textContent = prompt;
+        }
+
+        dispatchTextEvents(element);
+      };
+      const selectors = [
+        '#prompt-textarea',
+        'textarea',
+        'div[contenteditable="true"]',
+        '[contenteditable="true"]',
+        '[role="textbox"]'
+      ];
+      const editors = Array.from(document.querySelectorAll(selectors.join(','))).filter(isVisible);
+      const editor = editors.find((candidate) => {
+        const tag = candidate.tagName.toLowerCase();
+        return tag === 'textarea' || candidate.getAttribute('contenteditable') === 'true' || candidate.getAttribute('role') === 'textbox';
+      });
+
+      if (!editor) {
+        return { ok: false, reason: 'editor-not-found' };
+      }
+
+      editor.focus();
+      const existingText = readText(editor).trim();
+      let inserted = false;
+
+      if (!existingText.includes(prompt)) {
+        if (editor instanceof HTMLTextAreaElement || editor instanceof HTMLInputElement) {
+          setPlainInputValue(editor);
+        } else {
+          setEditableValue(editor);
+        }
+        inserted = true;
+      }
+
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(isVisible);
+      const sendButton = buttons.find((button) => {
+        const ariaLabel = button.getAttribute('aria-label') || '';
+        const title = button.getAttribute('title') || '';
+        const testId = button.getAttribute('data-testid') || '';
+        const text = [ariaLabel, title, testId, button.textContent || ''].join(' ').toLowerCase();
+        const disabled = button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true';
+        return !disabled && /(send|submit|arrow-up|send-button)/.test(text);
+      });
+
+      if (sendButton) {
+        sendButton.click();
+        return { ok: true, inserted, sent: true };
+      }
+
+      return { ok: false, inserted, sent: false, reason: 'send-button-not-found' };
+    })();
+  `;
 }
 
 function ProviderLogo({ iconUrl, provider }: { iconUrl?: string; provider: Provider }) {

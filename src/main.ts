@@ -21,6 +21,7 @@ import Store from 'electron-store';
 import {
   deepMergeSettings,
   defaultSettings,
+  isQuickAskProvider,
   type DeepPartial,
   type FloatAISettings,
   type Provider
@@ -29,7 +30,8 @@ import {
   providerWebSessionPartition,
   type ProviderIconPickResult,
   type PopupPosition,
-  type PopupSize
+  type PopupSize,
+  type QuickAskSubmitPayload
 } from './shared/bridge';
 import {
   type PortableBackupFile,
@@ -64,9 +66,10 @@ const isWindows = process.platform === 'win32';
 const appDisplayName = 'Float AI';
 const appUserModelId = 'com.floatai.launcher';
 const macDefaultHotkey = 'Option+Space';
+const quickAskDefaultHotkey = isMac ? 'Command+Shift+K' : 'Alt+Shift+K';
 const platformDefaultSettings = isMac
-  ? deepMergeSettings(defaultSettings, { globalHotkey: macDefaultHotkey })
-  : defaultSettings;
+  ? deepMergeSettings(defaultSettings, { globalHotkey: macDefaultHotkey, quickAsk: { hotkey: quickAskDefaultHotkey } })
+  : deepMergeSettings(defaultSettings, { quickAsk: { hotkey: quickAskDefaultHotkey } });
 const store = new Store<FloatAISettings>({
   name: 'float-ai-launcher',
   defaults: platformDefaultSettings
@@ -74,13 +77,18 @@ const store = new Store<FloatAISettings>({
 
 let settings = deepMergeSettings(platformDefaultSettings, store.store as DeepPartial<FloatAISettings>);
 let popupWindow: BrowserWindow | null = null;
+let quickAskWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let registeredHotkey: string | null = null;
+let registeredQuickAskHotkey: string | null = null;
 let currentProviderId = settings.defaultProviderId;
+let quickAskDisplayId: number | undefined;
 let savePositionTimer: NodeJS.Timeout | undefined;
 let isPopupRendererReady = false;
+let isQuickAskRendererReady = false;
 let isQuitting = false;
 let isHiding = false;
+let isQuickAskHiding = false;
 let isShortcutCaptureActive = false;
 let popupTopGuardTimer: NodeJS.Timeout | undefined;
 let popupTopReassertTimers: NodeJS.Timeout[] = [];
@@ -92,6 +100,7 @@ let popupInteractiveMoveSession: PopupInteractiveMoveSession | undefined;
 
 type PopupBoundsOptions = {
   anchorToCursor?: boolean;
+  centerOnDisplayId?: number;
 };
 
 type PopupInteractiveMoveSession = {
@@ -110,6 +119,8 @@ type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[
 const popupAlwaysOnTopLevel: AlwaysOnTopLevel = isWindows ? 'screen-saver' : 'floating';
 const popupTopGuardIntervalMs = 900;
 const popupTopReassertDelaysMs = [0, 80, 240];
+const quickAskWindowWidth = 740;
+const quickAskWindowHeight = 300;
 const maxPortableBackupBytes = 32 * 1024 * 1024;
 const maxPortableIconBytes = 5 * 1024 * 1024;
 
@@ -150,7 +161,7 @@ function getTrayIconPath(): string {
   return path.join(__dirname, '../icon_white.png');
 }
 
-function getRendererUrl(windowName: 'popup' | 'settings'): string {
+function getRendererUrl(windowName: 'popup' | 'settings' | 'quickAsk'): string {
   if (isDev) {
     const baseUrl = process.env.VITE_DEV_SERVER_URL ?? 'http://127.0.0.1:5173';
     return `${baseUrl}?window=${windowName}`;
@@ -159,7 +170,7 @@ function getRendererUrl(windowName: 'popup' | 'settings'): string {
   return path.join(__dirname, '../dist-renderer/index.html');
 }
 
-function loadRenderer(window: BrowserWindow, windowName: 'popup' | 'settings'): void {
+function loadRenderer(window: BrowserWindow, windowName: 'popup' | 'settings' | 'quickAsk'): void {
   if (isDev) {
     window.loadURL(getRendererUrl(windowName));
     return;
@@ -266,6 +277,10 @@ function calculatePopupBounds(options: PopupBoundsOptions = {}): Rectangle {
     return calculateCursorAnchoredPopupBounds(width, height);
   }
 
+  if (options.centerOnDisplayId !== undefined) {
+    return calculateDisplayCenteredPopupBounds(width, height, options.centerOnDisplayId);
+  }
+
   if (
     settings.popup.rememberPosition &&
     Number.isFinite(settings.popup.x) &&
@@ -319,6 +334,38 @@ function calculateCursorAnchoredPopupBounds(width: number, height: number): Rect
   return {
     x: clamp(preferredX, minX, Math.max(minX, maxX)),
     y: clamp(preferredY, minY, Math.max(minY, maxY)),
+    width,
+    height
+  };
+}
+
+function calculateDisplayCenteredPopupBounds(width: number, height: number, displayId: number): Rectangle {
+  const display =
+    screen.getAllDisplays().find((item) => item.id === displayId) ??
+    screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const workArea = display.workArea;
+  const margin = 18;
+  const minX = workArea.x + margin;
+  const maxX = workArea.x + workArea.width - width - margin;
+  const minY = workArea.y + margin;
+  const maxY = workArea.y + workArea.height - height - margin;
+
+  return {
+    x: clamp(Math.round(workArea.x + (workArea.width - width) / 2), minX, Math.max(minX, maxX)),
+    y: clamp(Math.round(workArea.y + (workArea.height - height) / 2), minY, Math.max(minY, maxY)),
+    width,
+    height
+  };
+}
+
+function calculateQuickAskBounds(display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())): Rectangle {
+  const workArea = display.workArea;
+  const width = clamp(quickAskWindowWidth, 320, Math.max(320, workArea.width - 48));
+  const height = quickAskWindowHeight;
+
+  return {
+    x: Math.round(workArea.x + (workArea.width - width) / 2),
+    y: Math.round(workArea.y + (workArea.height - height) / 2),
     width,
     height
   };
@@ -544,6 +591,194 @@ function openIntegratedSettings(): void {
   sendToPopup('popup:openSettings');
 }
 
+function createQuickAskWindow(): BrowserWindow {
+  if (quickAskWindow) {
+    return quickAskWindow;
+  }
+
+  const iconPath = getAppIconPath();
+  const iconImage = existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
+
+  quickAskWindow = new BrowserWindow({
+    ...calculateQuickAskBounds(),
+    title: `${appDisplayName} - Quick Ask`,
+    icon: iconImage,
+    show: false,
+    frame: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    transparent: true,
+    backgroundColor: '#00000000',
+    webPreferences: {
+      preload: getPreloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      webviewTag: false
+    }
+  });
+
+  if (isMac) {
+    quickAskWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+
+  quickAskWindow.setAlwaysOnTop(true, popupAlwaysOnTopLevel);
+
+  quickAskWindow.on('blur', () => {
+    hideQuickAsk();
+  });
+
+  quickAskWindow.on('closed', () => {
+    quickAskWindow = null;
+    isQuickAskRendererReady = false;
+    isQuickAskHiding = false;
+  });
+
+  quickAskWindow.webContents.once('did-finish-load', () => {
+    isQuickAskRendererReady = true;
+    sendToQuickAsk('settings:changed', settings);
+  });
+
+  quickAskWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  quickAskWindow.webContents.on('context-menu', (event) => {
+    event.preventDefault();
+  });
+
+  loadRenderer(quickAskWindow, 'quickAsk');
+  return quickAskWindow;
+}
+
+function sendToQuickAsk(channel: string, ...args: unknown[]): void {
+  const window = quickAskWindow;
+
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+
+  const send = () => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(channel, ...args);
+    }
+  };
+
+  if (isQuickAskRendererReady) {
+    send();
+    return;
+  }
+
+  window.webContents.once('did-finish-load', send);
+}
+
+function showQuickAsk(): void {
+  if (isShortcutCaptureActive) {
+    return;
+  }
+
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const window = createQuickAskWindow();
+
+  quickAskDisplayId = display.id;
+  isQuickAskHiding = false;
+  window.setBounds(calculateQuickAskBounds(display), false);
+  window.setAlwaysOnTop(true, popupAlwaysOnTopLevel);
+  window.show();
+  window.focus();
+  window.moveTop();
+
+  sendToQuickAsk('quickAsk:animate', 'in');
+  sendToQuickAsk('settings:changed', settings);
+}
+
+function hideQuickAsk(): void {
+  if (!quickAskWindow || isQuickAskHiding) {
+    return;
+  }
+
+  isQuickAskHiding = true;
+  sendToQuickAsk('quickAsk:animate', 'out');
+
+  setTimeout(() => {
+    if (quickAskWindow && !quickAskWindow.isDestroyed() && isQuickAskHiding) {
+      quickAskWindow.hide();
+      isQuickAskHiding = false;
+    }
+  }, 150);
+}
+
+function toggleQuickAsk(): void {
+  if (quickAskWindow?.isVisible() && !isQuickAskHiding) {
+    hideQuickAsk();
+    return;
+  }
+
+  showQuickAsk();
+}
+
+function submitQuickAsk(payload: QuickAskSubmitPayload): void {
+  const prompt = typeof payload.prompt === 'string' ? payload.prompt.trim() : '';
+  const providerId = typeof payload.providerId === 'string' ? payload.providerId : '';
+
+  if (!prompt) {
+    return;
+  }
+
+  if (!isQuickAskProvider(providerId)) {
+    throw new Error('Quick Ask currently supports ChatGPT, Claude, and Gemini.');
+  }
+
+  const provider = settings.providers.find((item) => item.id === providerId);
+
+  if (!provider) {
+    throw new Error(`Provider "${providerId}" was not found.`);
+  }
+
+  if (settings.quickAsk.providerId !== provider.id) {
+    settings = deepMergeSettings(settings, {
+      quickAsk: {
+        providerId: provider.id
+      }
+    });
+    store.set(settings);
+    broadcastSettings();
+    sendToQuickAsk('settings:changed', settings);
+  }
+
+  currentProviderId = provider.id;
+  broadcastProvider();
+  hideQuickAsk();
+  showPopup({ centerOnDisplayId: quickAskDisplayId });
+  sendToPopup('quickAsk:submitted', {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    providerId: provider.id,
+    prompt,
+    targetUrl: getQuickAskTargetUrl(provider)
+  });
+}
+
+function getQuickAskTargetUrl(provider: Provider): string {
+  if (provider.id === 'chatgpt') {
+    return 'https://chatgpt.com/';
+  }
+
+  if (provider.id === 'claude') {
+    return 'https://claude.ai/new';
+  }
+
+  if (provider.id === 'gemini') {
+    return 'https://gemini.google.com/app';
+  }
+
+  return provider.url;
+}
+
 function applyPopupSettings(options: PopupBoundsOptions = {}, skipOpacity = false): void {
   if (!popupWindow) {
     return;
@@ -737,7 +972,10 @@ function savePopupPosition(position?: PopupPosition): FloatAISettings {
 function updateSettings(patch: DeepPartial<FloatAISettings>): FloatAISettings {
   const previousSettings = settings;
   const previousHotkey = settings.globalHotkey;
+  const previousQuickAskHotkey = settings.quickAsk.hotkey;
   settings = deepMergeSettings(settings, patch);
+  const globalHotkeyChanged = settings.globalHotkey !== previousHotkey;
+  const quickAskHotkeyChanged = settings.quickAsk.hotkey !== previousQuickAskHotkey;
 
   if (!settings.providers.some((provider) => provider.id === currentProviderId)) {
     currentProviderId = settings.defaultProviderId;
@@ -748,13 +986,14 @@ function updateSettings(patch: DeepPartial<FloatAISettings>): FloatAISettings {
     broadcastProvider();
   }
 
-  if (settings.globalHotkey !== previousHotkey) {
-    const registered = registerGlobalShortcut({ allowFallback: false });
+  if (globalHotkeyChanged || quickAskHotkeyChanged) {
+    const registered = registerGlobalShortcuts({ allowFallback: false });
 
     if (!registered) {
       settings = previousSettings;
-      registerGlobalShortcut({ allowFallback: true });
-      throw new Error(`Could not register global shortcut "${patch.globalHotkey}". It may be invalid or already in use.`);
+      registerGlobalShortcuts({ allowFallback: true });
+      const failedHotkey = globalHotkeyChanged ? patch.globalHotkey : patch.quickAsk?.hotkey;
+      throw new Error(`Could not register shortcut "${failedHotkey}". It may be invalid or already in use.`);
     }
   }
 
@@ -1478,49 +1717,83 @@ function endPopupMoveInteractive(shouldSavePosition: boolean): FloatAISettings |
 
 function broadcastSettings(): void {
   sendToPopup('settings:changed', settings);
+  sendToQuickAsk('settings:changed', settings);
 }
 
 function broadcastProvider(): void {
   sendToPopup('provider:changed', getSelectedProvider());
 }
 
-function registerGlobalShortcut(options: { allowFallback?: boolean } = {}): string | null {
+function registerGlobalShortcuts(options: { allowFallback?: boolean } = {}): boolean {
+  unregisterRegisteredGlobalShortcuts();
+
+  registeredHotkey = registerShortcutFromCandidates(
+    [
+      settings.globalHotkey,
+      ...(isMac && options.allowFallback ? [macDefaultHotkey, 'CommandOrControl+Shift+Space'] : [])
+    ],
+    () => {
+      if (!isShortcutCaptureActive) {
+        togglePopup({ anchorToCursor: true });
+      }
+    },
+    'popup'
+  );
+
+  registeredQuickAskHotkey = registerShortcutFromCandidates(
+    [
+      settings.quickAsk.hotkey,
+      ...(options.allowFallback ? [quickAskDefaultHotkey, 'CommandOrControl+Shift+K'] : [])
+    ],
+    () => {
+      if (!isShortcutCaptureActive) {
+        toggleQuickAsk();
+      }
+    },
+    'Quick Ask'
+  );
+
+  if (isMac && app.isReady()) {
+    setupApplicationMenu();
+  }
+
+  return Boolean(registeredHotkey && registeredQuickAskHotkey);
+}
+
+function unregisterRegisteredGlobalShortcuts(): void {
   if (registeredHotkey) {
     globalShortcut.unregister(registeredHotkey);
     registeredHotkey = null;
   }
 
-  const preferredHotkeys = [
-    settings.globalHotkey,
-    ...(isMac && options.allowFallback ? [macDefaultHotkey, 'CommandOrControl+Shift+Space'] : [])
-  ].filter((hotkey, index, hotkeys) => hotkey && hotkeys.indexOf(hotkey) === index);
+  if (registeredQuickAskHotkey) {
+    globalShortcut.unregister(registeredQuickAskHotkey);
+    registeredQuickAskHotkey = null;
+  }
+}
+
+function registerShortcutFromCandidates(
+  candidates: string[],
+  callback: () => void,
+  label: string
+): string | null {
+  const preferredHotkeys = candidates.filter((hotkey, index, hotkeys) => hotkey && hotkeys.indexOf(hotkey) === index);
 
   for (const hotkey of preferredHotkeys) {
     let ok = false;
 
     try {
-      ok = globalShortcut.register(hotkey, () => {
-        if (!isShortcutCaptureActive) {
-          togglePopup({ anchorToCursor: true });
-        }
-      });
+      ok = globalShortcut.register(hotkey, callback);
     } catch {
       ok = false;
     }
 
     if (ok) {
-      registeredHotkey = hotkey;
-      if (isMac && app.isReady()) {
-        setupApplicationMenu();
-      }
       return hotkey;
     }
   }
 
-  console.warn(`Could not register global shortcut: ${preferredHotkeys.join(', ')}`);
-  if (isMac && app.isReady()) {
-    setupApplicationMenu();
-  }
+  console.warn(`Could not register ${label} shortcut: ${preferredHotkeys.join(', ')}`);
   return null;
 }
 
@@ -1532,14 +1805,11 @@ function setShortcutCaptureActive(active: boolean): void {
   isShortcutCaptureActive = active;
 
   if (active) {
-    if (registeredHotkey) {
-      globalShortcut.unregister(registeredHotkey);
-      registeredHotkey = null;
-    }
+    unregisterRegisteredGlobalShortcuts();
     return;
   }
 
-  registerGlobalShortcut({ allowFallback: true });
+  registerGlobalShortcuts({ allowFallback: true });
 }
 
 function syncLaunchAtStartup(): void {
@@ -1700,6 +1970,11 @@ function setupApplicationMenu(): void {
             click: () => showPopup({ anchorToCursor: true })
           },
           {
+            label: 'Quick Ask',
+            accelerator: registeredQuickAskHotkey ?? settings.quickAsk.hotkey,
+            click: () => showQuickAsk()
+          },
+          {
             label: 'Open Settings',
             accelerator: 'Command+,',
             click: openIntegratedSettings
@@ -1760,6 +2035,8 @@ function registerIpc(): void {
   ipcMain.handle('window:openSettings', () => openIntegratedSettings());
   ipcMain.handle('popup:toggle', () => togglePopup());
   ipcMain.handle('popup:hide', () => hidePopup());
+  ipcMain.handle('quickAsk:hide', () => hideQuickAsk());
+  ipcMain.handle('quickAsk:submit', (_event, payload: QuickAskSubmitPayload) => submitQuickAsk(payload));
   ipcMain.handle('shortcut:captureActive', (_event, active: boolean) => setShortcutCaptureActive(Boolean(active)));
   ipcMain.handle('provider:switch', (_event, providerId: string) => switchProvider(providerId));
   ipcMain.handle('provider:pickIcon', () => pickProviderIcon());
@@ -1799,7 +2076,6 @@ function registerIpc(): void {
   });
   ipcMain.handle('backup:export', () => exportPortableBackup());
   ipcMain.handle('backup:import', () => importPortableBackup());
-
 }
 
 registerIpc();
@@ -1919,7 +2195,7 @@ app.whenReady().then(() => {
   setupApplicationMenu();
   syncLaunchAtStartup();
   syncTray();
-  registerGlobalShortcut({ allowFallback: true });
+  registerGlobalShortcuts({ allowFallback: true });
 
   // When the app launches at startup the network may not be ready yet,
   // causing webviews to show blank pages.  Poll for connectivity and

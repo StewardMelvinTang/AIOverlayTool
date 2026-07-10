@@ -4,6 +4,8 @@ import type {
   PopupPosition,
   ProviderIconPickResult,
   PopupSize,
+  QuickAskRequest,
+  QuickAskSubmitPayload,
   WebviewNavigationDirection
 } from './shared/bridge';
 import type { DeepPartial, FloatAISettings, Provider } from './shared/settings';
@@ -16,6 +18,8 @@ const bridge: FloatAIBridge = {
   openSettings: () => ipcRenderer.invoke('window:openSettings') as Promise<void>,
   togglePopup: () => ipcRenderer.invoke('popup:toggle') as Promise<void>,
   hidePopup: () => ipcRenderer.invoke('popup:hide') as Promise<void>,
+  hideQuickAsk: () => ipcRenderer.invoke('quickAsk:hide') as Promise<void>,
+  submitQuickAsk: (payload: QuickAskSubmitPayload) => ipcRenderer.invoke('quickAsk:submit', payload) as Promise<void>,
   setShortcutCaptureActive: (active: boolean) => ipcRenderer.invoke('shortcut:captureActive', active) as Promise<void>,
   switchProvider: (providerId: string) => ipcRenderer.invoke('provider:switch', providerId) as Promise<Provider>,
   pickProviderIcon: () => ipcRenderer.invoke('provider:pickIcon'),
@@ -50,6 +54,16 @@ const bridge: FloatAIBridge = {
     const listener = (_event: Electron.IpcRendererEvent, provider: Provider) => callback(provider);
     ipcRenderer.on('provider:changed', listener);
     return () => ipcRenderer.removeListener('provider:changed', listener);
+  },
+  onQuickAskSubmitted: (callback: (request: QuickAskRequest) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, request: QuickAskRequest) => callback(request);
+    ipcRenderer.on('quickAsk:submitted', listener);
+    return () => ipcRenderer.removeListener('quickAsk:submitted', listener);
+  },
+  onQuickAskAnimate: (callback: (state: 'in' | 'out') => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: 'in' | 'out') => callback(state);
+    ipcRenderer.on('quickAsk:animate', listener);
+    return () => ipcRenderer.removeListener('quickAsk:animate', listener);
   },
   onOpenSettingsRequested: (callback: () => void) => {
     const listener = () => callback();
