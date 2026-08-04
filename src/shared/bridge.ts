@@ -26,6 +26,22 @@ export type ProviderIconPickResult = {
   url: string;
 };
 
+export type ProviderAudioState = {
+  webContentsId: number;
+  audible: boolean;
+};
+
+export type MemoryPressureState = {
+  includeSelected: boolean;
+};
+
+export type RendererErrorReport = {
+  kind: 'window-error' | 'unhandled-rejection' | 'react-error';
+  message: string;
+  stack?: string;
+  componentStack?: string;
+};
+
 export type QuickAskSubmitPayload = {
   providerId: string;
   prompt: string;
@@ -67,8 +83,11 @@ export type FloatAIBridge = {
   copyText: (text: string) => Promise<void>;
   exportPortableBackup: () => Promise<PortableBackupResult>;
   importPortableBackup: () => Promise<PortableBackupResult>;
+  reportRendererError: (report: RendererErrorReport) => void;
   onSettingsChanged: (callback: (settings: FloatAISettings) => void) => () => void;
   onProviderChanged: (callback: (provider: Provider) => void) => () => void;
+  onProviderAudioStateChanged: (callback: (state: ProviderAudioState) => void) => () => void;
+  onMemoryPressure: (callback: (state: MemoryPressureState) => void) => () => void;
   onQuickAskSubmitted: (callback: (request: QuickAskRequest) => void) => () => void;
   onQuickAskAnimate: (callback: (state: 'in' | 'out') => void) => () => void;
   onOpenSettingsRequested: (callback: () => void) => () => void;

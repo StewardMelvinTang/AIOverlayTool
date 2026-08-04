@@ -77,7 +77,7 @@ export default function QuickAskWindow() {
     return () => {
       cancelled = true;
     };
-  }, [providerIconSignature, providers]);
+  }, [providerIconSignature]);
 
   async function persist(patch: DeepPartial<FloatAISettings>) {
     const nextSettings = await window.floatAI.updateSettings(patch);

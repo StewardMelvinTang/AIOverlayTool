@@ -12,7 +12,8 @@ import {
   screen,
   shell,
   Tray,
-  type Rectangle
+  type Rectangle,
+  type WebContents
 } from 'electron';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -28,6 +29,7 @@ import {
 } from './shared/settings';
 import {
   providerWebSessionPartition,
+  type ProviderAudioState,
   type ProviderIconPickResult,
   type PopupPosition,
   type PopupSize,
@@ -59,6 +61,13 @@ import {
   restoreScratchPadState,
   updateScratchPadNote
 } from './main/scratchPadStorage';
+import {
+  getDiagnosticsDirectory,
+  initializeDiagnostics,
+  logError,
+  logInfo,
+  logWarn
+} from './main/diagnostics';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === 'darwin';
@@ -70,6 +79,11 @@ const quickAskDefaultHotkey = isMac ? 'Command+Shift+K' : 'Alt+Shift+K';
 const platformDefaultSettings = isMac
   ? deepMergeSettings(defaultSettings, { globalHotkey: macDefaultHotkey, quickAsk: { hotkey: quickAskDefaultHotkey } })
   : deepMergeSettings(defaultSettings, { quickAsk: { hotkey: quickAskDefaultHotkey } });
+
+if (!app.isPackaged && process.env.FLOAT_AI_USER_DATA_DIR) {
+  app.setPath('userData', path.resolve(process.env.FLOAT_AI_USER_DATA_DIR));
+}
+
 const store = new Store<FloatAISettings>({
   name: 'float-ai-launcher',
   defaults: platformDefaultSettings
@@ -84,6 +98,11 @@ let registeredQuickAskHotkey: string | null = null;
 let currentProviderId = settings.defaultProviderId;
 let quickAskDisplayId: number | undefined;
 let savePositionTimer: NodeJS.Timeout | undefined;
+let popupHideTimer: NodeJS.Timeout | undefined;
+let quickAskHideTimer: NodeJS.Timeout | undefined;
+let popupUnresponsiveTimer: NodeJS.Timeout | undefined;
+let quickAskUnresponsiveTimer: NodeJS.Timeout | undefined;
+let resourceMonitorTimer: NodeJS.Timeout | undefined;
 let isPopupRendererReady = false;
 let isQuickAskRendererReady = false;
 let isQuitting = false;
@@ -96,6 +115,10 @@ let popupMoveIdleTimer: NodeJS.Timeout | undefined;
 let isPopupMoving = false;
 let isPopupResizeInProgress = false;
 let popupInteractiveMoveSession: PopupInteractiveMoveSession | undefined;
+let lastMemoryPressureAt = 0;
+const webviewUnresponsiveTimers = new Map<number, NodeJS.Timeout>();
+const popupRecoveryAttempts: number[] = [];
+const quickAskRecoveryAttempts: number[] = [];
 
 
 type PopupBoundsOptions = {
@@ -119,6 +142,15 @@ type AlwaysOnTopLevel = NonNullable<Parameters<BrowserWindow['setAlwaysOnTop']>[
 const popupAlwaysOnTopLevel: AlwaysOnTopLevel = isWindows ? 'screen-saver' : 'floating';
 const popupTopGuardIntervalMs = 900;
 const popupTopReassertDelaysMs = [0, 80, 240];
+const popupHideAnimationMs = 120;
+const quickAskHideAnimationMs = 150;
+const popupUnresponsiveRecoveryMs = 8000;
+const providerUnresponsiveRecoveryMs = 12000;
+const resourceMonitorIntervalMs = 2 * 60 * 1000;
+const highMemoryPrivateBytesKb = 1536 * 1024;
+const memoryPressureCooldownMs = 10 * 60 * 1000;
+const automaticRecoveryWindowMs = 60 * 1000;
+const maximumAutomaticRecoveries = 3;
 const quickAskWindowWidth = 740;
 const quickAskWindowHeight = 300;
 const maxPortableBackupBytes = 32 * 1024 * 1024;
@@ -131,7 +163,7 @@ if (!settings.performance.hardwareAcceleration) {
 const gotLock = app.requestSingleInstanceLock();
 
 if (!gotLock) {
-  app.quit();
+  app.exit(0);
 }
 
 process.title = appDisplayName;
@@ -139,6 +171,10 @@ app.setName(appDisplayName);
 
 if (isWindows) {
   app.setAppUserModelId(appUserModelId);
+}
+
+if (gotLock) {
+  initializeDiagnostics();
 }
 
 function getPreloadPath(): string {
@@ -171,15 +207,20 @@ function getRendererUrl(windowName: 'popup' | 'settings' | 'quickAsk'): string {
 }
 
 function loadRenderer(window: BrowserWindow, windowName: 'popup' | 'settings' | 'quickAsk'): void {
+  let loadPromise: Promise<void>;
+
   if (isDev) {
-    window.loadURL(getRendererUrl(windowName));
-    return;
+    loadPromise = window.loadURL(getRendererUrl(windowName));
+  } else {
+    loadPromise = window.loadFile(getRendererUrl(windowName), {
+      query: {
+        window: windowName
+      }
+    });
   }
 
-  window.loadFile(getRendererUrl(windowName), {
-    query: {
-      window: windowName
-    }
+  void loadPromise.catch((error) => {
+    logError('renderer-load-rejected', error, { windowName });
   });
 }
 
@@ -375,10 +416,28 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function getUsableWebContents(window: BrowserWindow | null): WebContents | null {
+  if (!window || window.isDestroyed()) {
+    return null;
+  }
+
+  try {
+    const contents = window.webContents as WebContents | null;
+    return contents && !contents.isDestroyed() ? contents : null;
+  } catch {
+    return null;
+  }
+}
+
 function createPopupWindow(): BrowserWindow {
-  if (popupWindow) {
+  if (popupWindow && !popupWindow.isDestroyed()) {
     return popupWindow;
   }
+
+  popupWindow = null;
+  clearPopupHideTimer();
+  clearPopupUnresponsiveTimer();
+  isHiding = false;
 
   const iconPath = getAppIconPath();
   const iconImage = existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
@@ -405,6 +464,19 @@ function createPopupWindow(): BrowserWindow {
       webviewTag: true
     }
   });
+  const createdPopupWindow = popupWindow;
+  const createdPopupWebContents = createdPopupWindow.webContents;
+  const createdPopupWebContentsId = createdPopupWebContents.id;
+  let popupRecoveryStarted = false;
+
+  const recoverPopup = (reason: string) => {
+    if (popupRecoveryStarted) {
+      return;
+    }
+
+    popupRecoveryStarted = true;
+    recoverPopupRenderer(createdPopupWindow, reason);
+  };
 
   if (isMac) {
     popupWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -465,39 +537,102 @@ function createPopupWindow(): BrowserWindow {
   });
 
   popupWindow.on('closed', () => {
+    if (popupWindow !== createdPopupWindow) {
+      return;
+    }
+
+    clearPopupHideTimer();
+    clearPopupUnresponsiveTimer();
     stopPopupTopGuard();
     resetPopupMoving();
     setShortcutCaptureActive(false);
     popupWindow = null;
     isPopupRendererReady = false;
+    isHiding = false;
   });
 
-  popupWindow.webContents.once('did-finish-load', () => {
+  createdPopupWebContents.on('did-finish-load', () => {
+    if (popupWindow !== createdPopupWindow) {
+      return;
+    }
+
     isPopupRendererReady = true;
     broadcastSettings();
     broadcastProvider();
   });
 
+  createdPopupWebContents.on('unresponsive', () => {
+    if (isQuitting || popupWindow !== createdPopupWindow) {
+      return;
+    }
+
+    logWarn('popup-renderer-unresponsive', { webContentsId: createdPopupWebContentsId });
+    clearPopupUnresponsiveTimer();
+    popupUnresponsiveTimer = setTimeout(() => {
+      popupUnresponsiveTimer = undefined;
+
+      if (isQuitting || popupWindow !== createdPopupWindow || createdPopupWindow.isDestroyed()) {
+        return;
+      }
+
+      console.warn('Popup renderer stayed unresponsive; recovering it automatically.');
+      recoverPopup('unresponsive-timeout');
+    }, popupUnresponsiveRecoveryMs);
+  });
+
+  createdPopupWebContents.on('responsive', () => {
+    if (popupWindow === createdPopupWindow) {
+      logInfo('popup-renderer-responsive', { webContentsId: createdPopupWebContentsId });
+      clearPopupUnresponsiveTimer();
+    }
+  });
+
+  createdPopupWebContents.on('render-process-gone', (_event, details) => {
+    if (isQuitting || popupWindow !== createdPopupWindow || details.reason === 'clean-exit') {
+      return;
+    }
+
+    console.warn(`Popup renderer exited unexpectedly (${details.reason}); recovering it automatically.`);
+    logWarn('popup-render-process-gone', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      webContentsId: createdPopupWebContentsId
+    });
+    recoverPopup(`render-process-gone:${details.reason}`);
+  });
+
+  createdPopupWebContents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+    if (isMainFrame && errorCode !== -3) {
+      logWarn('popup-renderer-load-failed', { errorCode, errorDescription });
+    }
+  });
+
   popupWindow.on('app-command', (_event, command) => {
     if (command === 'browser-backward') {
-      popupWindow?.webContents.send('webview:navigate', 'back');
+      if (!createdPopupWebContents.isDestroyed()) {
+        createdPopupWebContents.send('webview:navigate', 'back');
+      }
     }
 
     if (command === 'browser-forward') {
-      popupWindow?.webContents.send('webview:navigate', 'forward');
+      if (!createdPopupWebContents.isDestroyed()) {
+        createdPopupWebContents.send('webview:navigate', 'forward');
+      }
     }
   });
 
-  popupWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+  createdPopupWebContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url).catch((error) => {
+      logError('popup-open-external-failed', error);
+    });
     return { action: 'deny' };
   });
 
-  popupWindow.webContents.on('context-menu', (event) => {
+  createdPopupWebContents.on('context-menu', (event) => {
     event.preventDefault();
   });
 
-  popupWindow.webContents.on('before-input-event', (event, input) => {
+  createdPopupWebContents.on('before-input-event', (event, input) => {
     if (switchProviderFromShortcutInput(input)) {
       event.preventDefault();
     }
@@ -509,14 +644,21 @@ function createPopupWindow(): BrowserWindow {
 
 function sendToPopup(channel: string, ...args: unknown[]): void {
   const window = popupWindow;
+  const contents = getUsableWebContents(window);
 
-  if (!window || window.isDestroyed()) {
+  if (!window || !contents) {
     return;
   }
 
   const send = () => {
-    if (!window.isDestroyed()) {
-      window.webContents.send(channel, ...args);
+    if (window.isDestroyed() || contents.isDestroyed()) {
+      return;
+    }
+
+    try {
+      contents.send(channel, ...args);
+    } catch (error) {
+      console.warn(`Could not send popup event "${channel}".`, error);
     }
   };
 
@@ -525,11 +667,140 @@ function sendToPopup(channel: string, ...args: unknown[]): void {
     return;
   }
 
-  window.webContents.once('did-finish-load', send);
+  contents.once('did-finish-load', send);
+}
+
+function clearPopupHideTimer(): void {
+  if (popupHideTimer) {
+    clearTimeout(popupHideTimer);
+    popupHideTimer = undefined;
+  }
+}
+
+function clearPopupUnresponsiveTimer(): void {
+  if (popupUnresponsiveTimer) {
+    clearTimeout(popupUnresponsiveTimer);
+    popupUnresponsiveTimer = undefined;
+  }
+}
+
+function recoverPopupRenderer(window: BrowserWindow, reason: string): void {
+  const wasVisible = !window.isDestroyed() && window.isVisible();
+  isPopupRendererReady = false;
+  setShortcutCaptureActive(false);
+  clearPopupHideTimer();
+  clearPopupUnresponsiveTimer();
+  isHiding = false;
+  stopPopupTopGuard();
+
+  logWarn('popup-renderer-recovery', { reason, wasVisible });
+
+  if (!window.isDestroyed()) {
+    window.destroy();
+  }
+
+  if (!wasVisible || isQuitting || !reserveAutomaticRecovery(popupRecoveryAttempts)) {
+    return;
+  }
+
+  setTimeout(() => {
+    if (!isQuitting && (!popupWindow || popupWindow.isDestroyed())) {
+      showPopup();
+    }
+  }, 300);
+}
+
+function runRendererRecoverySmokeTest(): void {
+  const initialWindow = createPopupWindow();
+  const initialContents = getUsableWebContents(initialWindow);
+
+  if (!initialContents) {
+    logError('renderer-recovery-smoke-test-failed', new Error('Popup web contents were unavailable.'));
+    app.exit(1);
+    return;
+  }
+
+  const initialWebContentsId = initialContents.id;
+  let finished = false;
+  let recoveryPoll: NodeJS.Timeout | undefined;
+
+  const finish = (passed: boolean, reason: string) => {
+    if (finished) {
+      return;
+    }
+
+    finished = true;
+    if (recoveryPoll) {
+      clearInterval(recoveryPoll);
+    }
+
+    const details = { reason, initialWebContentsId };
+    if (passed) {
+      logInfo('renderer-recovery-smoke-test-passed', details);
+    } else {
+      logWarn('renderer-recovery-smoke-test-failed', details);
+    }
+
+    setTimeout(() => app.exit(passed ? 0 : 1), 100);
+  };
+
+  const deadline = setTimeout(() => finish(false, 'recovery-timeout'), 15_000);
+  deadline.unref();
+
+  initialContents.once('render-process-gone', () => {
+    recoveryPoll = setInterval(() => {
+      const recoveredWindow = popupWindow;
+      const recoveredContents = getUsableWebContents(recoveredWindow);
+
+      if (
+        recoveredWindow &&
+        recoveredWindow !== initialWindow &&
+        recoveredContents &&
+        recoveredContents.id !== initialWebContentsId &&
+        isPopupRendererReady
+      ) {
+        clearTimeout(deadline);
+        finish(true, 'popup-recreated-and-ready');
+      }
+    }, 100);
+  });
+
+  initialContents.once('did-finish-load', () => {
+    initialWindow.show();
+    setTimeout(() => {
+      if (initialContents.isDestroyed()) {
+        finish(false, 'initial-renderer-disappeared-before-forced-crash');
+        return;
+      }
+
+      logInfo('renderer-recovery-smoke-test-forcing-crash', { initialWebContentsId });
+      initialContents.forcefullyCrashRenderer();
+    }, 250);
+  });
+}
+
+function reserveAutomaticRecovery(attempts: number[]): boolean {
+  const cutoff = Date.now() - automaticRecoveryWindowMs;
+
+  while (attempts.length > 0 && attempts[0] < cutoff) {
+    attempts.shift();
+  }
+
+  if (attempts.length >= maximumAutomaticRecoveries) {
+    logWarn('automatic-recovery-rate-limited', {
+      attempts: attempts.length,
+      windowMs: automaticRecoveryWindowMs
+    });
+    return false;
+  }
+
+  attempts.push(Date.now());
+  return true;
 }
 
 function showPopup(options: PopupBoundsOptions = {}): void {
   const window = createPopupWindow();
+  clearPopupHideTimer();
   applyPopupSettings(options, true);
 
   isHiding = false;
@@ -544,27 +815,76 @@ function showPopup(options: PopupBoundsOptions = {}): void {
 }
 
 function hidePopup(): void {
-  if (!popupWindow || isHiding) {
+  setShortcutCaptureActive(false);
+
+  const window = popupWindow;
+
+  if (!window || window.isDestroyed()) {
+    clearPopupHideTimer();
+    isHiding = false;
+    return;
+  }
+
+  if (isHiding) {
     return;
   }
 
   resetPopupMoving();
+  stopPopupTopGuard();
+  clearPopupHideTimer();
+  if (savePositionTimer) {
+    clearTimeout(savePositionTimer);
+    savePositionTimer = undefined;
+  }
+
+  let bounds: Rectangle | undefined;
+  try {
+    bounds = settings.popup.rememberPosition ? window.getBounds() : undefined;
+  } catch (error) {
+    console.warn('Could not read the popup position before hiding.', error);
+  }
+
   isHiding = true;
-  savePopupPosition();
-  sendToPopup('popup:animate', 'out');
-  
-  setTimeout(() => {
-    if (popupWindow && !popupWindow.isDestroyed() && isHiding) {
-      popupWindow.hide();
-      isHiding = false;
-      stopPopupTopGuard();
-      syncTray();
+
+  popupHideTimer = setTimeout(() => {
+    popupHideTimer = undefined;
+
+    if (popupWindow !== window || !isHiding) {
+      return;
     }
-  }, 120);
+
+    try {
+      if (!window.isDestroyed()) {
+        window.hide();
+      }
+    } catch (error) {
+      console.warn('Could not hide the popup window cleanly.', error);
+    } finally {
+      if (popupWindow === window) {
+        isHiding = false;
+        stopPopupTopGuard();
+        syncTray();
+      }
+    }
+
+    if (bounds) {
+      setImmediate(() => {
+        try {
+          savePopupPosition({ x: bounds.x, y: bounds.y }, false);
+        } catch (error) {
+          console.warn('Could not save the popup position after hiding.', error);
+        }
+      });
+    }
+  }, popupHideAnimationMs);
+
+  sendToPopup('popup:animate', 'out');
 }
 
 function togglePopup(options: PopupBoundsOptions = {}): void {
   if (isShortcutCaptureActive) {
+    setShortcutCaptureActive(false);
+    showPopup(options);
     return;
   }
 
@@ -578,6 +898,7 @@ function togglePopup(options: PopupBoundsOptions = {}): void {
 
 function openIntegratedSettings(): void {
   const window = createPopupWindow();
+  clearPopupHideTimer();
   applyPopupSettings({}, true);
 
   isHiding = false;
@@ -592,9 +913,13 @@ function openIntegratedSettings(): void {
 }
 
 function createQuickAskWindow(): BrowserWindow {
-  if (quickAskWindow) {
+  if (quickAskWindow && !quickAskWindow.isDestroyed()) {
     return quickAskWindow;
   }
+
+  quickAskWindow = null;
+  clearQuickAskHideTimer();
+  isQuickAskHiding = false;
 
   const iconPath = getAppIconPath();
   const iconImage = existsSync(iconPath) ? nativeImage.createFromPath(iconPath) : undefined;
@@ -621,6 +946,19 @@ function createQuickAskWindow(): BrowserWindow {
       webviewTag: false
     }
   });
+  const createdQuickAskWindow = quickAskWindow;
+  const createdQuickAskWebContents = createdQuickAskWindow.webContents;
+  const createdQuickAskWebContentsId = createdQuickAskWebContents.id;
+  let quickAskRecoveryStarted = false;
+
+  const recoverQuickAsk = (reason: string) => {
+    if (quickAskRecoveryStarted) {
+      return;
+    }
+
+    quickAskRecoveryStarted = true;
+    recoverQuickAskRenderer(createdQuickAskWindow, reason);
+  };
 
   if (isMac) {
     quickAskWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
@@ -633,22 +971,74 @@ function createQuickAskWindow(): BrowserWindow {
   });
 
   quickAskWindow.on('closed', () => {
+    if (quickAskWindow !== createdQuickAskWindow) {
+      return;
+    }
+
+    clearQuickAskHideTimer();
+    clearQuickAskUnresponsiveTimer();
     quickAskWindow = null;
     isQuickAskRendererReady = false;
     isQuickAskHiding = false;
   });
 
-  quickAskWindow.webContents.once('did-finish-load', () => {
+  createdQuickAskWebContents.once('did-finish-load', () => {
     isQuickAskRendererReady = true;
     sendToQuickAsk('settings:changed', settings);
   });
 
-  quickAskWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+  createdQuickAskWebContents.on('unresponsive', () => {
+    if (isQuitting || quickAskWindow !== createdQuickAskWindow) {
+      return;
+    }
+
+    logWarn('quick-ask-renderer-unresponsive', { webContentsId: createdQuickAskWebContentsId });
+    clearQuickAskUnresponsiveTimer();
+    quickAskUnresponsiveTimer = setTimeout(() => {
+      quickAskUnresponsiveTimer = undefined;
+
+      if (isQuitting || quickAskWindow !== createdQuickAskWindow || createdQuickAskWindow.isDestroyed()) {
+        return;
+      }
+
+      recoverQuickAsk('unresponsive-timeout');
+    }, popupUnresponsiveRecoveryMs);
+  });
+
+  createdQuickAskWebContents.on('responsive', () => {
+    if (quickAskWindow === createdQuickAskWindow) {
+      logInfo('quick-ask-renderer-responsive', { webContentsId: createdQuickAskWebContentsId });
+      clearQuickAskUnresponsiveTimer();
+    }
+  });
+
+  createdQuickAskWebContents.on('render-process-gone', (_event, details) => {
+    if (isQuitting || quickAskWindow !== createdQuickAskWindow || details.reason === 'clean-exit') {
+      return;
+    }
+
+    logWarn('quick-ask-render-process-gone', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      webContentsId: createdQuickAskWebContentsId
+    });
+    recoverQuickAsk(`render-process-gone:${details.reason}`);
+  });
+
+  createdQuickAskWebContents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+    if (isMainFrame && errorCode !== -3) {
+      logWarn('quick-ask-renderer-load-failed', { errorCode, errorDescription });
+    }
+  });
+
+  createdQuickAskWebContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url).catch((error) => {
+      logError('quick-ask-open-external-failed', error);
+    });
     return { action: 'deny' };
   });
 
-  quickAskWindow.webContents.on('context-menu', (event) => {
+  createdQuickAskWebContents.on('context-menu', (event) => {
     event.preventDefault();
   });
 
@@ -658,14 +1048,21 @@ function createQuickAskWindow(): BrowserWindow {
 
 function sendToQuickAsk(channel: string, ...args: unknown[]): void {
   const window = quickAskWindow;
+  const contents = getUsableWebContents(window);
 
-  if (!window || window.isDestroyed()) {
+  if (!window || !contents) {
     return;
   }
 
   const send = () => {
-    if (!window.isDestroyed()) {
-      window.webContents.send(channel, ...args);
+    if (window.isDestroyed() || contents.isDestroyed()) {
+      return;
+    }
+
+    try {
+      contents.send(channel, ...args);
+    } catch (error) {
+      console.warn(`Could not send Quick Ask event "${channel}".`, error);
     }
   };
 
@@ -674,7 +1071,45 @@ function sendToQuickAsk(channel: string, ...args: unknown[]): void {
     return;
   }
 
-  window.webContents.once('did-finish-load', send);
+  contents.once('did-finish-load', send);
+}
+
+function clearQuickAskHideTimer(): void {
+  if (quickAskHideTimer) {
+    clearTimeout(quickAskHideTimer);
+    quickAskHideTimer = undefined;
+  }
+}
+
+function clearQuickAskUnresponsiveTimer(): void {
+  if (quickAskUnresponsiveTimer) {
+    clearTimeout(quickAskUnresponsiveTimer);
+    quickAskUnresponsiveTimer = undefined;
+  }
+}
+
+function recoverQuickAskRenderer(window: BrowserWindow, reason: string): void {
+  const wasVisible = !window.isDestroyed() && window.isVisible();
+  isQuickAskRendererReady = false;
+  clearQuickAskHideTimer();
+  clearQuickAskUnresponsiveTimer();
+  isQuickAskHiding = false;
+
+  logWarn('quick-ask-renderer-recovery', { reason, wasVisible });
+
+  if (!window.isDestroyed()) {
+    window.destroy();
+  }
+
+  if (!wasVisible || isQuitting || !reserveAutomaticRecovery(quickAskRecoveryAttempts)) {
+    return;
+  }
+
+  setTimeout(() => {
+    if (!isQuitting && (!quickAskWindow || quickAskWindow.isDestroyed())) {
+      showQuickAsk();
+    }
+  }, 300);
 }
 
 function showQuickAsk(): void {
@@ -686,6 +1121,7 @@ function showQuickAsk(): void {
   const window = createQuickAskWindow();
 
   quickAskDisplayId = display.id;
+  clearQuickAskHideTimer();
   isQuickAskHiding = false;
   window.setBounds(calculateQuickAskBounds(display), false);
   window.setAlwaysOnTop(true, popupAlwaysOnTopLevel);
@@ -698,19 +1134,41 @@ function showQuickAsk(): void {
 }
 
 function hideQuickAsk(): void {
-  if (!quickAskWindow || isQuickAskHiding) {
+  const window = quickAskWindow;
+
+  if (!window || window.isDestroyed()) {
+    clearQuickAskHideTimer();
+    isQuickAskHiding = false;
     return;
   }
 
+  if (isQuickAskHiding) {
+    return;
+  }
+
+  clearQuickAskHideTimer();
   isQuickAskHiding = true;
   sendToQuickAsk('quickAsk:animate', 'out');
 
-  setTimeout(() => {
-    if (quickAskWindow && !quickAskWindow.isDestroyed() && isQuickAskHiding) {
-      quickAskWindow.hide();
-      isQuickAskHiding = false;
+  quickAskHideTimer = setTimeout(() => {
+    quickAskHideTimer = undefined;
+
+    if (quickAskWindow !== window || !isQuickAskHiding) {
+      return;
     }
-  }, 150);
+
+    try {
+      if (!window.isDestroyed()) {
+        window.hide();
+      }
+    } catch (error) {
+      console.warn('Could not hide the Quick Ask window cleanly.', error);
+    } finally {
+      if (quickAskWindow === window) {
+        isQuickAskHiding = false;
+      }
+    }
+  }, quickAskHideAnimationMs);
 }
 
 function toggleQuickAsk(): void {
@@ -932,7 +1390,7 @@ function normalizePopupSizeAfterMove(): void {
 }
 
 function queuePopupPositionSave(): void {
-  if (!settings.popup.rememberPosition || !popupWindow) {
+  if (!settings.popup.rememberPosition || !popupWindow || popupWindow.isDestroyed()) {
     return;
   }
 
@@ -941,20 +1399,34 @@ function queuePopupPositionSave(): void {
   }
 
   savePositionTimer = setTimeout(() => {
+    savePositionTimer = undefined;
     savePopupPosition();
   }, 250);
 }
 
-function savePopupPosition(position?: PopupPosition): FloatAISettings {
+function savePopupPosition(position?: PopupPosition, shouldBroadcast = true): FloatAISettings {
   if (!settings.popup.rememberPosition) {
     return settings;
   }
 
-  const bounds = popupWindow?.getBounds();
+  let bounds: Rectangle | undefined;
+
+  if (!position && popupWindow && !popupWindow.isDestroyed()) {
+    try {
+      bounds = popupWindow.getBounds();
+    } catch {
+      bounds = undefined;
+    }
+  }
+
   const x = position?.x ?? bounds?.x;
   const y = position?.y ?? bounds?.y;
 
   if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return settings;
+  }
+
+  if (settings.popup.x === x && settings.popup.y === y) {
     return settings;
   }
 
@@ -965,7 +1437,9 @@ function savePopupPosition(position?: PopupPosition): FloatAISettings {
     }
   });
   store.set(settings);
-  broadcastSettings();
+  if (shouldBroadcast) {
+    broadcastSettings();
+  }
   return settings;
 }
 
@@ -1850,6 +2324,18 @@ function createTrayImage(): Electron.NativeImage {
   return resizedImage;
 }
 
+function openDiagnosticsFolder(): void {
+  const diagnosticsPath = getDiagnosticsDirectory();
+  void shell.openPath(diagnosticsPath).then((errorMessage) => {
+    if (errorMessage) {
+      logWarn('open-diagnostics-folder-failed', { errorMessage });
+      return;
+    }
+
+    logInfo('diagnostics-folder-opened');
+  });
+}
+
 function createTrayMenu(): Menu {
   const canHide = Boolean(popupWindow?.isVisible() && !isHiding);
 
@@ -1875,6 +2361,10 @@ function createTrayMenu(): Menu {
     {
       label: 'Refresh Pages',
       click: () => reloadAllWebviews()
+    },
+    {
+      label: 'Open Diagnostics Folder',
+      click: openDiagnosticsFolder
     },
     { type: 'separator' },
     {
@@ -1984,6 +2474,10 @@ function setupApplicationMenu(): void {
             label: 'Refresh Pages',
             accelerator: 'Command+R',
             click: reloadAllWebviews
+          },
+          {
+            label: 'Open Diagnostics Folder',
+            click: openDiagnosticsFolder
           }
         ]
       },
@@ -2030,6 +2524,33 @@ function waitForNetworkAndReload(): void {
 }
 
 function registerIpc(): void {
+  ipcMain.on('diagnostics:rendererError', (event, report: unknown) => {
+    if (!report || typeof report !== 'object') {
+      return;
+    }
+
+    const candidate = report as Record<string, unknown>;
+    if (typeof candidate.message !== 'string') {
+      return;
+    }
+
+    const popupContents = getUsableWebContents(popupWindow);
+    const quickAskContents = getUsableWebContents(quickAskWindow);
+    const source =
+      event.sender === popupContents
+        ? 'popup'
+        : event.sender === quickAskContents
+          ? 'quick-ask'
+          : 'unknown-renderer';
+
+    logWarn('renderer-error-report', {
+      source,
+      kind: typeof candidate.kind === 'string' ? candidate.kind : 'unknown',
+      message: candidate.message,
+      stack: typeof candidate.stack === 'string' ? candidate.stack : undefined,
+      componentStack: typeof candidate.componentStack === 'string' ? candidate.componentStack : undefined
+    });
+  });
   ipcMain.handle('settings:get', () => settings);
   ipcMain.handle('settings:update', (_event, patch: DeepPartial<FloatAISettings>) => updateSettings(patch));
   ipcMain.handle('window:openSettings', () => openIntegratedSettings());
@@ -2078,14 +2599,36 @@ function registerIpc(): void {
   ipcMain.handle('backup:import', () => importPortableBackup());
 }
 
-registerIpc();
+if (gotLock) {
+  registerIpc();
+}
 
 app.on('second-instance', () => {
+  logInfo('second-instance-requested');
   showPopup();
+});
+
+app.on('child-process-gone', (_event, details) => {
+  logWarn('child-process-gone', details);
 });
 
 app.on('web-contents-created', (_event, contents) => {
   if (contents.getType() === 'webview') {
+    attachProviderWebContentsDiagnostics(contents);
+    const webContentsId = contents.id;
+    const sendProviderAudioState = (audible: boolean) => {
+      const state: ProviderAudioState = { webContentsId, audible };
+      sendToPopup('provider:audioStateChanged', state);
+    };
+
+    contents.on('audio-state-changed', (event) => {
+      sendProviderAudioState(event.audible);
+    });
+
+    contents.once('destroyed', () => {
+      sendProviderAudioState(false);
+    });
+
     contents.setWindowOpenHandler(({ url }) => {
       if (!isAllowedProviderPopupUrl(url)) {
         openExternalUrl(url);
@@ -2184,7 +2727,73 @@ function clearGuestSelection(contents: Electron.WebContents): void {
     .catch(() => undefined);
 }
 
+function startResourceMonitor(): void {
+  stopResourceMonitor();
+  collectResourceSnapshot('startup');
+  resourceMonitorTimer = setInterval(() => collectResourceSnapshot('interval'), resourceMonitorIntervalMs);
+  resourceMonitorTimer.unref();
+}
+
+function stopResourceMonitor(): void {
+  if (resourceMonitorTimer) {
+    clearInterval(resourceMonitorTimer);
+    resourceMonitorTimer = undefined;
+  }
+}
+
+function collectResourceSnapshot(reason: 'startup' | 'interval' | 'shutdown'): void {
+  try {
+    const processes = app
+      .getAppMetrics()
+      .map((metric) => ({
+        pid: metric.pid,
+        type: metric.type,
+        name: metric.name,
+        privateBytesKb: metric.memory.privateBytes ?? metric.memory.workingSetSize,
+        workingSetKb: metric.memory.workingSetSize,
+        cpuPercent: Math.round(metric.cpu.percentCPUUsage * 10) / 10
+      }))
+      .sort((left, right) => right.privateBytesKb - left.privateBytesKb);
+    const totalPrivateBytesKb = processes.reduce((total, metric) => total + metric.privateBytesKb, 0);
+    const totalWorkingSetKb = processes.reduce((total, metric) => total + metric.workingSetKb, 0);
+
+    logInfo('resource-snapshot', {
+      reason,
+      processCount: processes.length,
+      totalPrivateMb: Math.round(totalPrivateBytesKb / 1024),
+      totalWorkingSetMb: Math.round(totalWorkingSetKb / 1024),
+      processes: processes.map((metric) => ({
+        ...metric,
+        privateBytesKb: undefined,
+        workingSetKb: undefined,
+        privateMb: Math.round(metric.privateBytesKb / 1024),
+        workingSetMb: Math.round(metric.workingSetKb / 1024)
+      }))
+    });
+
+    if (
+      totalPrivateBytesKb >= highMemoryPrivateBytesKb &&
+      Date.now() - lastMemoryPressureAt >= memoryPressureCooldownMs
+    ) {
+      lastMemoryPressureAt = Date.now();
+      const includeSelected = !popupWindow || popupWindow.isDestroyed() || !popupWindow.isVisible();
+      logWarn('high-memory-pressure', {
+        totalPrivateMb: Math.round(totalPrivateBytesKb / 1024),
+        includeSelected
+      });
+      sendToPopup('memory:pressure', { includeSelected });
+    }
+  } catch (error) {
+    logError('resource-snapshot-failed', error, { reason });
+  }
+}
+
 app.whenReady().then(() => {
+  if (!gotLock) {
+    app.exit(0);
+    return;
+  }
+
   app.userAgentFallback = app.userAgentFallback.replace(/Electron\/[\d.]+ /, '');
 
   settings = deepMergeSettings(platformDefaultSettings, store.store as DeepPartial<FloatAISettings>);
@@ -2196,6 +2805,18 @@ app.whenReady().then(() => {
   syncLaunchAtStartup();
   syncTray();
   registerGlobalShortcuts({ allowFallback: true });
+  startResourceMonitor();
+  logInfo('app-ready', {
+    providerCount: settings.providers.length,
+    alwaysActiveProviderCount: settings.providers.filter((provider) => provider.alwaysActive).length,
+    memorySaverEnabled: settings.performance.memorySaver,
+    memorySaverUnloadMinutes: settings.performance.memorySaverUnloadMinutes,
+    hardwareAccelerationEnabled: settings.performance.hardwareAcceleration
+  });
+
+  if (!app.isPackaged && process.env.FLOAT_AI_TEST_RENDERER_RECOVERY === '1') {
+    runRendererRecoverySmokeTest();
+  }
 
   // When the app launches at startup the network may not be ready yet,
   // causing webviews to show blank pages.  Poll for connectivity and
@@ -2206,16 +2827,100 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  if (!gotLock) {
+    return;
+  }
+
   isQuitting = true;
-  savePopupPosition();
+  collectResourceSnapshot('shutdown');
+  stopResourceMonitor();
+  clearPopupHideTimer();
+  clearQuickAskHideTimer();
+  clearPopupUnresponsiveTimer();
+  clearQuickAskUnresponsiveTimer();
+  for (const timer of webviewUnresponsiveTimers.values()) {
+    clearTimeout(timer);
+  }
+  webviewUnresponsiveTimers.clear();
+  try {
+    savePopupPosition();
+  } catch (error) {
+    console.warn('Could not save the popup position while quitting.', error);
+  }
 });
 
+function attachProviderWebContentsDiagnostics(contents: Electron.WebContents): void {
+  const webContentsId = contents.id;
+
+  const clearUnresponsiveTimer = () => {
+    const timer = webviewUnresponsiveTimers.get(webContentsId);
+    if (timer) {
+      clearTimeout(timer);
+      webviewUnresponsiveTimers.delete(webContentsId);
+    }
+  };
+
+  contents.on('unresponsive', () => {
+    if (contents.isDestroyed()) {
+      return;
+    }
+
+    logWarn('provider-webview-unresponsive', { webContentsId });
+    clearUnresponsiveTimer();
+
+    const timer = setTimeout(() => {
+      webviewUnresponsiveTimers.delete(webContentsId);
+
+      if (contents.isDestroyed()) {
+        return;
+      }
+
+      logWarn('provider-webview-force-recovery', { webContentsId });
+      contents.forcefullyCrashRenderer();
+    }, providerUnresponsiveRecoveryMs);
+
+    webviewUnresponsiveTimers.set(webContentsId, timer);
+  });
+
+  contents.on('responsive', () => {
+    logInfo('provider-webview-responsive', { webContentsId });
+    clearUnresponsiveTimer();
+  });
+
+  contents.on('render-process-gone', (_event, details) => {
+    clearUnresponsiveTimer();
+    logWarn('provider-webview-render-process-gone', {
+      webContentsId,
+      reason: details.reason,
+      exitCode: details.exitCode
+    });
+  });
+
+  contents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+    if (isMainFrame && errorCode !== -3) {
+      logWarn('provider-webview-load-failed', { webContentsId, errorCode, errorDescription });
+    }
+  });
+
+  contents.once('destroyed', () => {
+    clearUnresponsiveTimer();
+    logInfo('provider-webview-destroyed', { webContentsId });
+  });
+}
+
 app.on('will-quit', () => {
+  if (!gotLock) {
+    return;
+  }
+
+  logInfo('app-will-quit');
   globalShortcut.unregisterAll();
 });
 
 app.on('activate', () => {
-  showPopup();
+  if (gotLock) {
+    showPopup();
+  }
 });
 
 app.on('window-all-closed', () => {

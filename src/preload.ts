@@ -1,11 +1,14 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   FloatAIBridge,
+  MemoryPressureState,
   PopupPosition,
+  ProviderAudioState,
   ProviderIconPickResult,
   PopupSize,
   QuickAskRequest,
   QuickAskSubmitPayload,
+  RendererErrorReport,
   WebviewNavigationDirection
 } from './shared/bridge';
 import type { DeepPartial, FloatAISettings, Provider } from './shared/settings';
@@ -45,6 +48,7 @@ const bridge: FloatAIBridge = {
   copyText: (text) => ipcRenderer.invoke('clipboard:writeText', text) as Promise<void>,
   exportPortableBackup: () => ipcRenderer.invoke('backup:export'),
   importPortableBackup: () => ipcRenderer.invoke('backup:import'),
+  reportRendererError: (report: RendererErrorReport) => ipcRenderer.send('diagnostics:rendererError', report),
   onSettingsChanged: (callback: (settings: FloatAISettings) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, nextSettings: FloatAISettings) => callback(nextSettings);
     ipcRenderer.on('settings:changed', listener);
@@ -54,6 +58,16 @@ const bridge: FloatAIBridge = {
     const listener = (_event: Electron.IpcRendererEvent, provider: Provider) => callback(provider);
     ipcRenderer.on('provider:changed', listener);
     return () => ipcRenderer.removeListener('provider:changed', listener);
+  },
+  onProviderAudioStateChanged: (callback: (state: ProviderAudioState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: ProviderAudioState) => callback(state);
+    ipcRenderer.on('provider:audioStateChanged', listener);
+    return () => ipcRenderer.removeListener('provider:audioStateChanged', listener);
+  },
+  onMemoryPressure: (callback: (state: MemoryPressureState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: MemoryPressureState) => callback(state);
+    ipcRenderer.on('memory:pressure', listener);
+    return () => ipcRenderer.removeListener('memory:pressure', listener);
   },
   onQuickAskSubmitted: (callback: (request: QuickAskRequest) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, request: QuickAskRequest) => callback(request);

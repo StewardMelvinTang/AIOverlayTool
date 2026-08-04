@@ -1,7 +1,5 @@
 import {
   Check,
-  ChevronLeft,
-  ChevronRight,
   Blocks,
   Download,
   Edit3,
@@ -19,6 +17,7 @@ import {
   StickyNote,
   Trash2,
   Upload,
+  Volume2,
   X
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -81,8 +80,10 @@ type WebviewElement = HTMLElement & {
   canGoBack: () => boolean;
   canGoForward: () => boolean;
   getURL: () => string;
+  getWebContentsId: () => number;
   goBack: () => void;
   goForward: () => void;
+  isCurrentlyAudible: () => boolean;
   loadURL: (url: string) => Promise<void> | void;
   reload: () => void;
   executeJavaScript: (code: string, userGesture?: boolean) => Promise<unknown>;
@@ -97,6 +98,12 @@ const emptyProviderDraft: ProviderDraft = {
 
 const toolbarMoveDragThreshold = 4;
 const toolbarMoveClickSuppressMs = 180;
+const activeAddonPillTransitionMs = 280;
+// React's webview typings model allowpopups as a boolean, but React removes a
+// boolean value from the DOM. Electron needs the attribute to be present.
+const popupEnabledWebviewAttributes = {
+  allowpopups: 'true'
+} as unknown as { allowpopups: boolean };
 
 export default function PopupWindow() {
   const [settings, setSettings] = useState<FloatAISettings | null>(null);
@@ -104,9 +111,11 @@ export default function PopupWindow() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [addonsOpen, setAddonsOpen] = useState(false);
   const [activeAddonId, setActiveAddonId] = useState<string | null>(null);
+  const [displayedAddonId, setDisplayedAddonId] = useState<string | null>(null);
   const [isActiveAddonExpanded, setIsActiveAddonExpanded] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('window');
   const [loadingByProvider, setLoadingByProvider] = useState<Record<string, boolean>>({});
+  const [audibleProviderIds, setAudibleProviderIds] = useState<Set<string>>(() => new Set());
   const [hotkeyDraft, setHotkeyDraft] = useState('');
   const [hotkeyListening, setHotkeyListening] = useState(false);
   const [hotkeyError, setHotkeyError] = useState('');
@@ -128,23 +137,34 @@ export default function PopupWindow() {
   const [providerDrag, setProviderDrag] = useState<ProviderDragState | null>(null);
   const webviewRefs = useRef<Record<string, WebviewElement | null>>({});
   const webviewCleanupRefs = useRef<Record<string, (() => void) | undefined>>({});
+  const providerByWebContentsIdRef = useRef<Record<number, string | undefined>>({});
   const providerLastUrlsRef = useRef<Record<string, string>>({});
   const unloadTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
+  const hiddenProviderUnloadTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const webviewRecoveryTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
   const providerTooltipTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const activeAddonExitTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const providerDragSessionRef = useRef<ProviderDragSession | null>(null);
   const providerDragListenersRef = useRef<ProviderDragListeners | null>(null);
   const providerDragFrameRef = useRef<number | undefined>(undefined);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const toolbarMoveDragSessionRef = useRef<ToolbarMoveDragSession | null>(null);
   const toolbarMoveSuppressClickUntilRef = useRef(0);
   const loadedProviderIdsRef = useRef<Set<string>>(new Set());
   const alwaysActiveProviderIdsRef = useRef<Set<string>>(new Set());
   const selectedProviderIdRef = useRef('');
+  const settingsRef = useRef<FloatAISettings | null>(null);
+  const isVisibleRef = useRef(true);
   const webviewInitialUrlsRef = useRef<Record<string, string>>({});
   const pendingQuickAskRef = useRef<QuickAskRequest | null>(null);
   const quickAskAttemptCountRef = useRef<Record<string, number>>({});
   const quickAskRetryTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
   const [loadedProviderIds, setLoadedProviderIds] = useState<Set<string>>(() => new Set());
   const providerStripRef = useRef<HTMLDivElement>(null);
+  const providerScrollTargetRef = useRef(0);
+  const providerScrollFrameRef = useRef<number | undefined>(undefined);
+  const providerScrollLastFrameRef = useRef(0);
+  const providerAutoScrollBlockedUntilRef = useRef(0);
   const [scrollState, setScrollState] = useState({ left: false, right: false });
   const [isVisible, setIsVisible] = useState(true);
   const isMac = window.floatAI.platform === 'darwin';
@@ -152,37 +172,194 @@ export default function PopupWindow() {
   const checkStripScroll = useCallback(() => {
     if (!providerStripRef.current) return;
     const { scrollLeft, scrollWidth, clientWidth } = providerStripRef.current;
-    setScrollState({
-      left: scrollLeft > 0,
-      right: Math.ceil(scrollLeft + clientWidth) < scrollWidth - 1
+    const nextState = {
+      left: scrollLeft > 1,
+      right: scrollLeft + clientWidth < scrollWidth - 1
+    };
+
+    setScrollState((current) => {
+      if (current.left === nextState.left && current.right === nextState.right) {
+        return current;
+      }
+
+      return nextState;
     });
   }, []);
 
+  const stopProviderScrollAnimation = useCallback(() => {
+    if (providerScrollFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(providerScrollFrameRef.current);
+      providerScrollFrameRef.current = undefined;
+      providerScrollLastFrameRef.current = 0;
+    }
+
+    if (providerStripRef.current) {
+      providerScrollTargetRef.current = providerStripRef.current.scrollLeft;
+    }
+  }, []);
+
+  const animateProviderScroll = useCallback(() => {
+    if (providerScrollFrameRef.current !== undefined) {
+      return;
+    }
+
+    providerScrollLastFrameRef.current = 0;
+
+    const step = (timestamp: number) => {
+      const container = providerStripRef.current;
+      if (!container) {
+        providerScrollFrameRef.current = undefined;
+        return;
+      }
+
+      const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+      const target = Math.min(maxScrollLeft, Math.max(0, providerScrollTargetRef.current));
+      providerScrollTargetRef.current = target;
+      const distance = target - container.scrollLeft;
+
+      if (Math.abs(distance) < 0.5) {
+        container.scrollLeft = target;
+        providerScrollFrameRef.current = undefined;
+        providerScrollLastFrameRef.current = 0;
+        checkStripScroll();
+        return;
+      }
+
+      const elapsed = providerScrollLastFrameRef.current
+        ? Math.min(34, timestamp - providerScrollLastFrameRef.current)
+        : 16.67;
+      providerScrollLastFrameRef.current = timestamp;
+      const easing = 1 - Math.exp(-elapsed / 72);
+      container.scrollLeft += distance * easing;
+      providerScrollFrameRef.current = window.requestAnimationFrame(step);
+    };
+
+    providerScrollFrameRef.current = window.requestAnimationFrame(step);
+  }, [checkStripScroll]);
+
+  const scrollProviderStripTo = useCallback(
+    (left: number) => {
+      const container = providerStripRef.current;
+      if (!container) {
+        return;
+      }
+
+      const maxScrollLeft = Math.max(0, container.scrollWidth - container.clientWidth);
+      providerScrollTargetRef.current = Math.min(maxScrollLeft, Math.max(0, left));
+
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        if (providerScrollFrameRef.current !== undefined) {
+          window.cancelAnimationFrame(providerScrollFrameRef.current);
+          providerScrollFrameRef.current = undefined;
+          providerScrollLastFrameRef.current = 0;
+        }
+        container.scrollLeft = providerScrollTargetRef.current;
+        checkStripScroll();
+        return;
+      }
+
+      animateProviderScroll();
+    },
+    [animateProviderScroll, checkStripScroll]
+  );
+
+  const scrollProviderStripBy = useCallback(
+    (distance: number) => {
+      const container = providerStripRef.current;
+      if (!container) {
+        return;
+      }
+
+      const startingPoint =
+        providerScrollFrameRef.current === undefined ? container.scrollLeft : providerScrollTargetRef.current;
+      scrollProviderStripTo(startingPoint + distance);
+    },
+    [scrollProviderStripTo]
+  );
+
+  const scrollActiveProviderIntoView = useCallback(() => {
+    if (toolbarMoveDragSessionRef.current || Date.now() < providerAutoScrollBlockedUntilRef.current) {
+      return;
+    }
+
+    const container = providerStripRef.current;
+    const activeProvider = container?.querySelector<HTMLElement>('.provider-pill.active');
+
+    if (!container || !activeProvider) {
+      return;
+    }
+
+    const edgePadding = 12;
+    const visibleLeft = container.scrollLeft;
+    const visibleRight = visibleLeft + container.clientWidth;
+    const providerLeft = activeProvider.offsetLeft;
+    const providerRight = providerLeft + activeProvider.offsetWidth;
+
+    if (providerLeft < visibleLeft + edgePadding) {
+      scrollProviderStripTo(providerLeft - edgePadding);
+    } else if (providerRight > visibleRight - edgePadding) {
+      scrollProviderStripTo(providerRight - container.clientWidth + edgePadding);
+    }
+  }, [scrollProviderStripTo]);
+
+  const handleProviderStripScroll = () => {
+    const container = providerStripRef.current;
+    if (container && providerScrollFrameRef.current === undefined) {
+      providerScrollTargetRef.current = container.scrollLeft;
+    }
+    checkStripScroll();
+  };
+
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
-    const container = e.currentTarget;
+    const container = providerStripRef.current;
+    if (!container) {
+      return;
+    }
+
     const maxScrollLeft = container.scrollWidth - container.clientWidth;
 
     if (maxScrollLeft <= 0) {
       return;
     }
 
-    const rawDelta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-    if (rawDelta === 0) {
+    let delta = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+    if (delta === 0) {
       return;
     }
 
-    const multiplier = e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? container.clientWidth : 1;
-    const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, container.scrollLeft + rawDelta * multiplier));
+    if (e.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+      delta *= 28;
+    } else if (e.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+      delta *= container.clientWidth * 0.82;
+    }
 
     e.preventDefault();
-    container.scrollLeft = nextScrollLeft;
-    window.requestAnimationFrame(checkStripScroll);
+    e.stopPropagation();
+    scrollProviderStripBy(delta);
   };
 
   function updateLoadedProviders(updater: (current: Set<string>) => Set<string>) {
     setLoadedProviderIds((current) => {
       const next = updater(new Set(current));
       loadedProviderIdsRef.current = next;
+      return next;
+    });
+  }
+
+  function setProviderAudible(providerId: string, audible: boolean) {
+    setAudibleProviderIds((current) => {
+      if (current.has(providerId) === audible) {
+        return current;
+      }
+
+      const next = new Set(current);
+
+      if (audible) {
+        next.add(providerId);
+      } else {
+        next.delete(providerId);
+      }
+
       return next;
     });
   }
@@ -194,6 +371,91 @@ export default function PopupWindow() {
       clearTimeout(timer);
       unloadTimersRef.current[providerId] = undefined;
     }
+  }
+
+  function cancelTransientPopupInteractions() {
+    setHotkeyListening(false);
+    setQuickAskHotkeyListening(false);
+    setProviderTooltip(null);
+    setProviderDrag(null);
+    setIsResizingMode(false);
+
+    if (providerTooltipTimerRef.current) {
+      clearTimeout(providerTooltipTimerRef.current);
+      providerTooltipTimerRef.current = undefined;
+    }
+
+    removeProviderDragListeners();
+    cancelProviderDragFrame();
+    providerDragSessionRef.current = null;
+    resizeCleanupRef.current?.();
+
+    if (toolbarMoveDragSessionRef.current) {
+      window.floatAI.endPopupMoveInteractive(false).catch(() => undefined);
+      toolbarMoveDragSessionRef.current = null;
+    }
+  }
+
+  function clearHiddenProviderUnloadTimer() {
+    if (hiddenProviderUnloadTimerRef.current) {
+      clearTimeout(hiddenProviderUnloadTimerRef.current);
+      hiddenProviderUnloadTimerRef.current = undefined;
+    }
+  }
+
+  function releaseProviderMemory(includeSelected: boolean) {
+    for (const providerId of Array.from(loadedProviderIdsRef.current)) {
+      unloadProvider(providerId, { allowSelected: includeSelected });
+    }
+  }
+
+  function scheduleHiddenProviderUnload() {
+    clearHiddenProviderUnloadTimer();
+    const currentSettings = settingsRef.current;
+
+    if (!currentSettings?.performance.memorySaver) {
+      return;
+    }
+
+    hiddenProviderUnloadTimerRef.current = setTimeout(() => {
+      hiddenProviderUnloadTimerRef.current = undefined;
+      releaseProviderMemory(true);
+    }, currentSettings.performance.memorySaverUnloadMinutes * 60 * 1000);
+  }
+
+  function scheduleProviderRecovery(providerId: string) {
+    const existingTimer = webviewRecoveryTimersRef.current[providerId];
+    if (existingTimer) {
+      return;
+    }
+
+    rememberProviderUrl(providerId);
+    updateLoadedProviders((current) => {
+      current.delete(providerId);
+      return current;
+    });
+
+    webviewRecoveryTimersRef.current[providerId] = setTimeout(() => {
+      webviewRecoveryTimersRef.current[providerId] = undefined;
+      const currentSettings = settingsRef.current;
+      const provider = currentSettings?.providers.find((candidate) => candidate.id === providerId);
+
+      if (!currentSettings || !provider) {
+        return;
+      }
+
+      const shouldReload =
+        provider.alwaysActive ||
+        !currentSettings.performance.memorySaver ||
+        (isVisibleRef.current && selectedProviderIdRef.current === providerId);
+
+      if (shouldReload) {
+        updateLoadedProviders((current) => {
+          current.add(providerId);
+          return current;
+        });
+      }
+    }, 800);
   }
 
   function rememberProviderUrl(providerId: string) {
@@ -214,13 +476,17 @@ export default function PopupWindow() {
     }
   }
 
-  function unloadProvider(providerId: string) {
-    if (selectedProviderIdRef.current === providerId || alwaysActiveProviderIdsRef.current.has(providerId)) {
+  function unloadProvider(providerId: string, options: { allowSelected?: boolean } = {}) {
+    if (
+      (!options.allowSelected && selectedProviderIdRef.current === providerId) ||
+      alwaysActiveProviderIdsRef.current.has(providerId)
+    ) {
       return;
     }
 
     rememberProviderUrl(providerId);
     clearUnloadTimer(providerId);
+    setProviderAudible(providerId, false);
     setLoadingByProvider((current) => ({
       ...current,
       [providerId]: false
@@ -256,10 +522,53 @@ export default function PopupWindow() {
   }
 
   useEffect(() => {
-    checkStripScroll();
-    window.addEventListener('resize', checkStripScroll);
-    return () => window.removeEventListener('resize', checkStripScroll);
-  }, [checkStripScroll, settings?.providers]);
+    const syncProviderStrip = () => {
+      checkStripScroll();
+      scrollActiveProviderIntoView();
+    };
+    const layoutFrame = window.requestAnimationFrame(syncProviderStrip);
+    const labelTransitionTimer = window.setTimeout(syncProviderStrip, 300);
+
+    window.addEventListener('resize', syncProviderStrip);
+    return () => {
+      window.removeEventListener('resize', syncProviderStrip);
+      window.cancelAnimationFrame(layoutFrame);
+      window.clearTimeout(labelTransitionTimer);
+
+      stopProviderScrollAnimation();
+    };
+  }, [
+    checkStripScroll,
+    scrollActiveProviderIntoView,
+    selectedProviderId,
+    settings?.compactProviderBar,
+    settings?.providers,
+    stopProviderScrollAnimation
+  ]);
+
+  useEffect(() => {
+    if (activeAddonExitTimerRef.current) {
+      clearTimeout(activeAddonExitTimerRef.current);
+      activeAddonExitTimerRef.current = undefined;
+    }
+
+    if (activeAddonId) {
+      setDisplayedAddonId(activeAddonId);
+      return undefined;
+    }
+
+    activeAddonExitTimerRef.current = setTimeout(() => {
+      activeAddonExitTimerRef.current = undefined;
+      setDisplayedAddonId(null);
+    }, activeAddonPillTransitionMs);
+
+    return () => {
+      if (activeAddonExitTimerRef.current) {
+        clearTimeout(activeAddonExitTimerRef.current);
+        activeAddonExitTimerRef.current = undefined;
+      }
+    };
+  }, [activeAddonId]);
 
   useEffect(() => {
     let mounted = true;
@@ -269,6 +578,7 @@ export default function PopupWindow() {
         return;
       }
 
+      settingsRef.current = nextSettings;
       setSettings(nextSettings);
       setSelectedProviderId(nextSettings.defaultProviderId);
       setHotkeyDraft(nextSettings.globalHotkey);
@@ -279,6 +589,7 @@ export default function PopupWindow() {
     });
 
     const removeSettingsListener = window.floatAI.onSettingsChanged((nextSettings) => {
+      settingsRef.current = nextSettings;
       setSettings(nextSettings);
       setHotkeyDraft((current) => current || nextSettings.globalHotkey);
       setHotkeyError('');
@@ -296,6 +607,18 @@ export default function PopupWindow() {
       setAddonsOpen(false);
     });
 
+    const removeProviderAudioStateListener = window.floatAI.onProviderAudioStateChanged((state) => {
+      const providerId = providerByWebContentsIdRef.current[state.webContentsId];
+
+      if (providerId) {
+        setProviderAudible(providerId, state.audible);
+      }
+    });
+
+    const removeMemoryPressureListener = window.floatAI.onMemoryPressure((state) => {
+      releaseProviderMemory(state.includeSelected);
+    });
+
     const removeOpenSettingsListener = window.floatAI.onOpenSettingsRequested(() => {
       setAddonsOpen(false);
       setSettingsOpen(true);
@@ -307,7 +630,24 @@ export default function PopupWindow() {
     });
 
     const removeAnimateListener = window.floatAI.onAnimate((state) => {
-      setIsVisible(state === 'in');
+      const visible = state === 'in';
+      isVisibleRef.current = visible;
+
+      if (!visible) {
+        cancelTransientPopupInteractions();
+        scheduleHiddenProviderUnload();
+      } else {
+        clearHiddenProviderUnloadTimer();
+        const selectedProviderId = selectedProviderIdRef.current;
+        if (selectedProviderId) {
+          updateLoadedProviders((current) => {
+            current.add(selectedProviderId);
+            return current;
+          });
+        }
+      }
+
+      setIsVisible(visible);
     });
 
     const removeReloadListener = window.floatAI.onReloadAllWebviews(() => {
@@ -340,6 +680,8 @@ export default function PopupWindow() {
       mounted = false;
       removeSettingsListener();
       removeProviderListener();
+      removeProviderAudioStateListener();
+      removeMemoryPressureListener();
       removeOpenSettingsListener();
       removeNavigationListener();
       removeAnimateListener();
@@ -353,6 +695,13 @@ export default function PopupWindow() {
       for (const providerId of Object.keys(unloadTimersRef.current)) {
         clearUnloadTimer(providerId);
       }
+      clearHiddenProviderUnloadTimer();
+      for (const timer of Object.values(webviewRecoveryTimersRef.current)) {
+        if (timer) {
+          clearTimeout(timer);
+        }
+      }
+      webviewRecoveryTimersRef.current = {};
       for (const timer of Object.values(quickAskRetryTimersRef.current)) {
         if (timer) {
           clearTimeout(timer);
@@ -361,10 +710,14 @@ export default function PopupWindow() {
       if (providerTooltipTimerRef.current) {
         clearTimeout(providerTooltipTimerRef.current);
       }
+      if (activeAddonExitTimerRef.current) {
+        clearTimeout(activeAddonExitTimerRef.current);
+      }
       removeProviderDragListeners();
       cancelProviderDragFrame();
+      resizeCleanupRef.current?.();
       providerDragSessionRef.current = null;
-      if (toolbarMoveDragSessionRef.current?.dragging) {
+      if (toolbarMoveDragSessionRef.current) {
         window.floatAI.endPopupMoveInteractive(false).catch(() => undefined);
       }
       toolbarMoveDragSessionRef.current = null;
@@ -443,6 +796,10 @@ export default function PopupWindow() {
     () => (activeAddonId ? getAddonManifest(activeAddonId) : undefined),
     [activeAddonId]
   );
+  const displayedAddon = useMemo(
+    () => (displayedAddonId ? getAddonManifest(displayedAddonId) : undefined),
+    [displayedAddonId]
+  );
 
   const providerMemorySignature =
     settings?.providers.map((provider) => `${provider.id}:${provider.alwaysActive ? 1 : 0}`).join('|') ?? '';
@@ -463,6 +820,11 @@ export default function PopupWindow() {
       settings.providers.filter((provider) => provider.alwaysActive).map((provider) => provider.id)
     );
     alwaysActiveProviderIdsRef.current = alwaysActiveProviderIds;
+
+    setAudibleProviderIds((current) => {
+      const next = new Set(Array.from(current).filter((providerId) => providerIds.has(providerId)));
+      return next.size === current.size ? current : next;
+    });
 
     for (const providerId of Object.keys(unloadTimersRef.current)) {
       if (!providerIds.has(providerId) || alwaysActiveProviderIds.has(providerId)) {
@@ -541,7 +903,7 @@ export default function PopupWindow() {
     return () => {
       cancelled = true;
     };
-  }, [providerIconSignature, settings]);
+  }, [providerIconSignature]);
 
   useEffect(() => {
     let cancelled = false;
@@ -729,6 +1091,13 @@ export default function PopupWindow() {
     }
   }
 
+  function handleHidePopup() {
+    cancelTransientPopupInteractions();
+    window.floatAI.hidePopup().catch(() => {
+      setIsVisible(true);
+    });
+  }
+
   function patchPopup(patch: DeepPartial<FloatAISettings>['popup']) {
     return persist({
       popup: patch
@@ -749,11 +1118,13 @@ export default function PopupWindow() {
     void markProviderVisited(providerId);
   }
 
-  function startToolbarProviderMove(event: React.PointerEvent<HTMLButtonElement>) {
+  function startToolbarProviderMove(event: React.PointerEvent<HTMLElement>) {
     if (event.button !== 0) {
       return;
     }
 
+    stopProviderScrollAnimation();
+    providerAutoScrollBlockedUntilRef.current = Date.now() + 600;
     hideProviderTooltip();
     window.floatAI.beginPopupMoveInteractive().catch(() => undefined);
     toolbarMoveDragSessionRef.current = {
@@ -765,7 +1136,7 @@ export default function PopupWindow() {
     event.currentTarget.setPointerCapture?.(event.pointerId);
   }
 
-  function moveToolbarProvider(event: React.PointerEvent<HTMLButtonElement>) {
+  function moveToolbarProvider(event: React.PointerEvent<HTMLElement>) {
     const session = toolbarMoveDragSessionRef.current;
 
     if (!session || session.pointerId !== event.pointerId) {
@@ -803,7 +1174,7 @@ export default function PopupWindow() {
     window.floatAI.movePopupInteractive().catch(() => undefined);
   }
 
-  function finishToolbarProviderMove(event: React.PointerEvent<HTMLButtonElement>) {
+  function finishToolbarProviderMove(event: React.PointerEvent<HTMLElement>) {
     const session = toolbarMoveDragSessionRef.current;
 
     if (!session || session.pointerId !== event.pointerId) {
@@ -811,6 +1182,8 @@ export default function PopupWindow() {
     }
 
     toolbarMoveDragSessionRef.current = null;
+    stopProviderScrollAnimation();
+    providerAutoScrollBlockedUntilRef.current = Date.now() + 400;
 
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -827,7 +1200,7 @@ export default function PopupWindow() {
     window.floatAI.endPopupMoveInteractive(true).catch(() => undefined);
   }
 
-  function cancelToolbarProviderMove(event: React.PointerEvent<HTMLButtonElement>) {
+  function cancelToolbarProviderMove(event: React.PointerEvent<HTMLElement>) {
     const session = toolbarMoveDragSessionRef.current;
 
     if (!session || session.pointerId !== event.pointerId) {
@@ -835,6 +1208,8 @@ export default function PopupWindow() {
     }
 
     toolbarMoveDragSessionRef.current = null;
+    stopProviderScrollAnimation();
+    providerAutoScrollBlockedUntilRef.current = Date.now() + 400;
 
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -860,11 +1235,40 @@ export default function PopupWindow() {
     void handleProviderChange(providerId);
   }
 
+  function isProviderPillPointerEvent(event: React.PointerEvent<HTMLElement>): boolean {
+    return event.target instanceof Element && Boolean(event.target.closest('.provider-pill'));
+  }
+
+  function startProviderStripMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (!isProviderPillPointerEvent(event)) {
+      startToolbarProviderMove(event);
+    }
+  }
+
+  function moveProviderStrip(event: React.PointerEvent<HTMLDivElement>) {
+    if (!isProviderPillPointerEvent(event)) {
+      moveToolbarProvider(event);
+    }
+  }
+
+  function finishProviderStripMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (!isProviderPillPointerEvent(event)) {
+      finishToolbarProviderMove(event);
+    }
+  }
+
+  function cancelProviderStripMove(event: React.PointerEvent<HTMLDivElement>) {
+    if (!isProviderPillPointerEvent(event)) {
+      cancelToolbarProviderMove(event);
+    }
+  }
+
   function handleOpenAddon(addonId: string) {
     if (!getAddonManifest(addonId)) {
       return;
     }
 
+    setDisplayedAddonId(addonId);
     setActiveAddonId(addonId);
     setIsActiveAddonExpanded(false);
     setAddonsOpen(false);
@@ -1158,6 +1562,7 @@ export default function PopupWindow() {
     }
 
     const providerId = providerToDelete;
+    setProviderAudible(providerId, false);
     const providers = settings.providers.filter((provider) => provider.id !== providerId);
     const fallbackProvider = providers[0];
     const shouldMoveSelection = selectedProviderId === providerId;
@@ -1439,26 +1844,67 @@ export default function PopupWindow() {
     const handleStopLoading = () => setProviderLoading(false);
     const handleNavigation = () => rememberProviderUrl(providerId);
     const handleQuickAskReady = () => scheduleQuickAskSubmitAttempt(providerId, 180);
+    let attachedWebContentsId: number | undefined;
 
+    const syncProviderWebContents = () => {
+      try {
+        const webContentsId = element.getWebContentsId();
+
+        if (attachedWebContentsId !== undefined && attachedWebContentsId !== webContentsId) {
+          delete providerByWebContentsIdRef.current[attachedWebContentsId];
+        }
+
+        attachedWebContentsId = webContentsId;
+        providerByWebContentsIdRef.current[webContentsId] = providerId;
+        setProviderAudible(providerId, element.isCurrentlyAudible());
+      } catch {
+        // The guest may not be attached yet; did-attach will retry the mapping.
+      }
+    };
+
+    const handleWebviewRenderProcessGone = () => {
+      setProviderAudible(providerId, false);
+      setProviderLoading(true);
+      scheduleProviderRecovery(providerId);
+    };
+    const handleWebviewDestroyed = () => setProviderAudible(providerId, false);
+
+    element.addEventListener('did-attach', syncProviderWebContents);
     element.addEventListener('did-start-loading', handleStartLoading);
     element.addEventListener('did-stop-loading', handleStopLoading);
+    element.addEventListener('did-stop-loading', syncProviderWebContents);
     element.addEventListener('did-fail-load', handleStopLoading);
     element.addEventListener('did-navigate', handleNavigation);
     element.addEventListener('did-navigate-in-page', handleNavigation);
     element.addEventListener('dom-ready', handleNavigation);
+    element.addEventListener('dom-ready', syncProviderWebContents);
     element.addEventListener('dom-ready', handleQuickAskReady);
     element.addEventListener('did-stop-loading', handleQuickAskReady);
+    element.addEventListener('render-process-gone', handleWebviewRenderProcessGone);
+    element.addEventListener('destroyed', handleWebviewDestroyed);
+    syncProviderWebContents();
 
     webviewCleanupRefs.current[providerId] = () => {
       rememberProviderUrl(providerId);
+      if (
+        attachedWebContentsId !== undefined &&
+        providerByWebContentsIdRef.current[attachedWebContentsId] === providerId
+      ) {
+        delete providerByWebContentsIdRef.current[attachedWebContentsId];
+      }
+      element.removeEventListener('did-attach', syncProviderWebContents);
       element.removeEventListener('did-start-loading', handleStartLoading);
       element.removeEventListener('did-stop-loading', handleStopLoading);
+      element.removeEventListener('did-stop-loading', syncProviderWebContents);
       element.removeEventListener('did-fail-load', handleStopLoading);
       element.removeEventListener('did-navigate', handleNavigation);
       element.removeEventListener('did-navigate-in-page', handleNavigation);
       element.removeEventListener('dom-ready', handleNavigation);
+      element.removeEventListener('dom-ready', syncProviderWebContents);
       element.removeEventListener('dom-ready', handleQuickAskReady);
       element.removeEventListener('did-stop-loading', handleQuickAskReady);
+      element.removeEventListener('render-process-gone', handleWebviewRenderProcessGone);
+      element.removeEventListener('destroyed', handleWebviewDestroyed);
     };
   }
 
@@ -1467,6 +1913,8 @@ export default function PopupWindow() {
     e.stopPropagation();
     if (!settings) return;
 
+    resizeCleanupRef.current?.();
+
     const target = e.currentTarget;
     target.setPointerCapture(e.pointerId);
 
@@ -1474,6 +1922,13 @@ export default function PopupWindow() {
     let currentHeight = settings.popup.height;
     let lastScreenX = e.screenX;
     let lastScreenY = e.screenY;
+    let resizeFrame: number | undefined;
+    let finished = false;
+
+    const flushResize = () => {
+      resizeFrame = undefined;
+      window.floatAI.resizePopupInteractive({ width: currentWidth, height: currentHeight }).catch(() => undefined);
+    };
 
     const onPointerMove = (moveEvent: PointerEvent) => {
       const deltaX = moveEvent.screenX - lastScreenX;
@@ -1483,18 +1938,47 @@ export default function PopupWindow() {
 
       currentWidth = Math.max(420, Math.min(1800, currentWidth + deltaX));
       currentHeight = Math.max(360, Math.min(1400, currentHeight + deltaY));
-      window.floatAI.resizePopupInteractive({ width: currentWidth, height: currentHeight });
+
+      if (resizeFrame === undefined) {
+        resizeFrame = window.requestAnimationFrame(flushResize);
+      }
     };
 
-    const onPointerUp = (upEvent: PointerEvent) => {
-      target.releasePointerCapture(upEvent.pointerId);
+    const finishResize = (save: boolean) => {
+      if (finished) {
+        return;
+      }
+
+      finished = true;
+      if (resizeFrame !== undefined) {
+        window.cancelAnimationFrame(resizeFrame);
+        resizeFrame = undefined;
+      }
+
       target.removeEventListener('pointermove', onPointerMove);
       target.removeEventListener('pointerup', onPointerUp);
-      patchPopup({ width: currentWidth, height: currentHeight });
+      target.removeEventListener('pointercancel', onPointerCancel);
+      target.removeEventListener('lostpointercapture', onPointerCancel);
+
+      if (target.hasPointerCapture(e.pointerId)) {
+        target.releasePointerCapture(e.pointerId);
+      }
+
+      resizeCleanupRef.current = null;
+
+      if (save) {
+        patchPopup({ width: currentWidth, height: currentHeight }).catch(() => undefined);
+      }
     };
 
+    const onPointerUp = () => finishResize(true);
+    const onPointerCancel = () => finishResize(false);
+
+    resizeCleanupRef.current = () => finishResize(false);
     target.addEventListener('pointermove', onPointerMove);
     target.addEventListener('pointerup', onPointerUp);
+    target.addEventListener('pointercancel', onPointerCancel);
+    target.addEventListener('lostpointercapture', onPointerCancel);
   };
 
 
@@ -1590,32 +2074,35 @@ export default function PopupWindow() {
           >
             <Blocks size={17} />
           </button>
-          {activeAddon && (
-            <button
-              className="active-addon-pill no-drag"
-              type="button"
-              onClick={() => {
-                setAddonsOpen(false);
-                setSettingsOpen(false);
-              }}
-              aria-label={`${activeAddon.title}, active add-on`}
-              title={activeAddon.title}
-            >
-              {activeAddon.id === 'scratchpad' ? <StickyNote size={15} /> : <Gauge size={15} />}
-              <span>{activeAddon.title}</span>
-            </button>
-          )}
+          <div
+            className={activeAddon ? 'active-addon-slot visible' : 'active-addon-slot'}
+            aria-hidden={!activeAddon}
+          >
+            {displayedAddon && (
+              <div className="active-addon-pill">
+                {displayedAddon.id === 'scratchpad' ? <StickyNote size={15} /> : <Gauge size={15} />}
+                <span>{displayedAddon.title}</span>
+              </div>
+            )}
+          </div>
           <span className="provider-apps-divider" aria-hidden="true" />
-          <div className={`provider-strip-wrapper ${scrollState.left ? 'mask-left' : ''} ${scrollState.right ? 'mask-right' : ''}`}>
+          <div
+            className={`provider-strip-wrapper no-drag ${scrollState.left ? 'mask-left' : ''} ${scrollState.right ? 'mask-right' : ''}`}
+            onWheel={handleWheel}
+          >
             <div
               className="provider-strip"
               aria-label="Providers"
               ref={providerStripRef}
-              onScroll={checkStripScroll}
-              onWheel={handleWheel}
+              onScroll={handleProviderStripScroll}
+              onPointerDown={startProviderStripMove}
+              onPointerMove={moveProviderStrip}
+              onPointerUp={finishProviderStripMove}
+              onPointerCancel={cancelProviderStripMove}
             >
               {settings.providers.map((provider) => {
                 const isActiveProvider = !activeAddon && provider.id === selectedProvider.id;
+                const isPlayingAudio = audibleProviderIds.has(provider.id);
                 const isCompactProviderBar = settings.compactProviderBar ?? false;
                 const showProviderLabel = !isCompactProviderBar || isActiveProvider;
 
@@ -1640,9 +2127,13 @@ export default function PopupWindow() {
                     onMouseLeave={hideProviderTooltip}
                     onFocus={(event) => showProviderTooltip(provider.id, event.currentTarget)}
                     onBlur={hideProviderTooltip}
-                    aria-label={`${provider.name}, ${formatProviderWebPage(provider.url)}`}
+                    aria-label={`${provider.name}, ${formatProviderWebPage(provider.url)}${isPlayingAudio ? ', playing audio' : ''}`}
                   >
-                    <ProviderLogo provider={provider} iconUrl={providerIconUrls[provider.id]} />
+                    <ProviderLogo
+                      provider={provider}
+                      iconUrl={providerIconUrls[provider.id]}
+                      isPlayingAudio={isPlayingAudio}
+                    />
                     <span
                       className={showProviderLabel ? 'provider-pill-label visible' : 'provider-pill-label'}
                       aria-hidden={!showProviderLabel}
@@ -1651,7 +2142,7 @@ export default function PopupWindow() {
                     </span>
                   </button>
                 );
-              })}
+                })}
             </div>
           </div>
         </div>
@@ -1690,7 +2181,13 @@ export default function PopupWindow() {
         >
           <Settings size={17} />
         </button>
-        <button className="icon-button no-drag close-button" type="button" onClick={() => window.floatAI.hidePopup()} title="Hide">
+        <button
+          className="icon-button no-drag close-button"
+          type="button"
+          onClick={handleHidePopup}
+          title="Hide"
+          aria-label="Hide Float AI"
+        >
           <X size={18} />
         </button>
       </header>
@@ -1729,11 +2226,11 @@ export default function PopupWindow() {
             return (
               <webview
                 key={provider.id}
+                {...popupEnabledWebviewAttributes}
                 ref={(element) => setWebviewRef(provider.id, element as WebviewElement | null)}
                 className={provider.id === selectedProvider.id ? 'provider-webview active' : 'provider-webview'}
                 src={getWebviewMountUrl(provider)}
                 partition={providerWebSessionPartition}
-                allowpopups
               />
             );
           })}
@@ -2555,7 +3052,15 @@ function createQuickAskInjectionScript(prompt: string): string {
   `;
 }
 
-function ProviderLogo({ iconUrl, provider }: { iconUrl?: string; provider: Provider }) {
+function ProviderLogo({
+  iconUrl,
+  isPlayingAudio = false,
+  provider
+}: {
+  iconUrl?: string;
+  isPlayingAudio?: boolean;
+  provider: Provider;
+}) {
   const iconKey = provider.icon.trim().toLowerCase();
   const knownClass = !iconUrl && ['chatgpt', 'claude', 'gemini', 'perplexity', 'copilot'].includes(iconKey)
     ? ` logo-${iconKey}`
@@ -2568,11 +3073,16 @@ function ProviderLogo({ iconUrl, provider }: { iconUrl?: string; provider: Provi
     .toUpperCase();
 
   return (
-    <span className={`provider-logo${knownClass}`} aria-hidden="true">
+    <span className={`provider-logo${knownClass}${isPlayingAudio ? ' has-audio-badge' : ''}`} aria-hidden="true">
       {iconUrl ? (
         <img src={iconUrl} alt="" draggable={false} />
       ) : (
         <span>{iconKey === 'chatgpt' ? '' : initials || provider.icon.slice(0, 2).toUpperCase()}</span>
+      )}
+      {isPlayingAudio && (
+        <span className="provider-audio-badge">
+          <Volume2 size={8} strokeWidth={2.8} />
+        </span>
       )}
     </span>
   );

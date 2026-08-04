@@ -1,4 +1,4 @@
-import { Activity, AlertCircle, Clock, Play, Square, Wifi } from 'lucide-react';
+import { AlertCircle, Play, Square } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 type SpeedSummary = {
@@ -6,8 +6,6 @@ type SpeedSummary = {
   uploadMbps?: number;
   latencyMs?: number;
   jitterMs?: number;
-  packetLossPercent?: number;
-  testedAt: string;
 };
 
 const downloadApiUrl = 'https://speed.cloudflare.com/__down';
@@ -23,7 +21,6 @@ export default function SpeedTestPanel() {
   const [status, setStatus] = useState('Ready');
   const [progress, setProgress] = useState(0);
   const [summary, setSummary] = useState<SpeedSummary | null>(null);
-  const [history, setHistory] = useState<SpeedSummary[]>([]);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -65,11 +62,7 @@ export default function SpeedTestPanel() {
         return;
       }
 
-      setSummary((current) => ({
-        testedAt: current?.testedAt ?? new Date().toISOString(),
-        ...current,
-        ...patch
-      }));
+      setSummary((current) => ({ ...current, ...patch }));
     };
 
     try {
@@ -97,12 +90,10 @@ export default function SpeedTestPanel() {
         downloadMbps,
         uploadMbps,
         latencyMs,
-        jitterMs,
-        testedAt: new Date().toISOString()
+        jitterMs
       };
 
       setSummary(finalSummary);
-      setHistory((current) => [finalSummary, ...current].slice(0, 4));
       setProgress(100);
       setStatus('Finished');
     } catch (testError) {
@@ -130,89 +121,58 @@ export default function SpeedTestPanel() {
 
   return (
     <div className="speedtest-panel">
-      <section className="speedtest-hero">
-        <div>
-          <span className="speedtest-kicker">
-            <Wifi size={15} />
-            Cloudflare network test
-          </span>
-          <h2>{summary?.downloadMbps !== undefined ? formatMbps(summary.downloadMbps) : '--'}</h2>
-          <p>Download Mbps</p>
+      <section className="speedtest-surface">
+        <div className="speedtest-download-circle" aria-live="polite">
+          <span>Download</span>
+          <strong>{summary?.downloadMbps !== undefined ? formatMbps(summary.downloadMbps) : '--'}</strong>
+          <small>Mbps</small>
         </div>
+
         <div className="speedtest-controls">
-          <button className="primary-button compact" type="button" onClick={startTest} disabled={running}>
+          <button className="speedtest-start-button" type="button" onClick={startTest} disabled={running}>
             <Play size={15} />
-            Start Test
+            {running ? 'Testing' : 'Start Test'}
           </button>
           {running && (
-            <button className="addon-secondary-button" type="button" onClick={pauseTest}>
+            <button className="speedtest-stop-button" type="button" onClick={pauseTest}>
               <Square size={14} />
               Stop
             </button>
           )}
         </div>
-      </section>
 
-      <div className="speedtest-progress-row">
-        <div className="speedtest-progress-bar" aria-label={`${progress}%`}>
-          <span style={{ width: `${progress}%` }} />
-        </div>
-        <span>{status}</span>
-      </div>
-
-      {error && (
-        <div className="speedtest-error">
-          <AlertCircle size={16} />
-          {error}
-        </div>
-      )}
-
-      <div className="speedtest-metrics-grid">
-        <MetricCard label="Upload" value={formatOptional(summary?.uploadMbps, formatMbps)} suffix="Mbps" />
-        <MetricCard label="Latency" value={formatOptional(summary?.latencyMs, formatMs)} suffix="ms" />
-        <MetricCard label="Jitter" value={formatOptional(summary?.jitterMs, formatMs)} suffix="ms" />
-        <MetricCard
-          label="Packet Loss"
-          value={summary?.packetLossPercent !== undefined ? `${summary.packetLossPercent.toFixed(1)}%` : 'Not tested'}
-          suffix=""
-        />
-      </div>
-
-      <div className="speedtest-note">
-        <Activity size={15} />
-        <span>Results are approximate and depend on the current network.</span>
-      </div>
-
-      <section className="speedtest-history">
-        <div className="speedtest-section-heading">
-          <Clock size={15} />
-          <span>Recent results</span>
-        </div>
-        {history.length > 0 ? (
-          <div className="speedtest-history-list">
-            {history.map((item) => (
-              <div className="speedtest-history-row" key={item.testedAt}>
-                <strong>{formatMbps(item.downloadMbps)}</strong>
-                <span>{formatTimestamp(item.testedAt)}</span>
-                <span>{formatOptional(item.uploadMbps, formatMbps)} up</span>
-                <span>{formatOptional(item.latencyMs, formatMs)} ping</span>
-              </div>
-            ))}
+        <div className="speedtest-progress">
+          <div className="speedtest-progress-bar" aria-label={`${progress}%`}>
+            <span style={{ width: `${progress}%` }} />
           </div>
-        ) : (
-          <div className="speedtest-history-empty">No test history yet</div>
+          <span>{status}</span>
+        </div>
+
+        {error && (
+          <div className="speedtest-error">
+            <AlertCircle size={16} />
+            {error}
+          </div>
         )}
+
+        <div className="speedtest-metrics">
+          <Metric label="Upload" value={formatOptional(summary?.uploadMbps, formatMbps)} unit="Mbps" />
+          <Metric label="Latency" value={formatOptional(summary?.latencyMs, formatMs)} unit="ms" />
+          <Metric label="Jitter" value={formatOptional(summary?.jitterMs, formatMs)} unit="ms" />
+        </div>
       </section>
     </div>
   );
 }
 
-function MetricCard({ label, suffix, value }: { label: string; suffix: string; value: string }) {
+function Metric({ label, unit, value }: { label: string; unit: string; value: string }) {
   return (
-    <div className="speedtest-metric-card">
+    <div className="speedtest-metric">
       <span>{label}</span>
-      <strong>{value}</strong>
-      {suffix && <small>{suffix}</small>}
+      <strong>
+        {value}
+        <small>{unit}</small>
+      </strong>
     </div>
   );
 }
@@ -359,11 +319,4 @@ function formatMs(value: number | undefined): string {
 
 function formatOptional(value: number | undefined, formatter: (nextValue: number | undefined) => string): string {
   return formatter(value);
-}
-
-function formatTimestamp(value: string): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit'
-  }).format(new Date(value));
 }

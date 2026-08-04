@@ -2,11 +2,20 @@
 
 Float AI is a macOS and Windows Electron app that opens a floating, always-on-top AI launcher with a global shortcut. It uses a React + TypeScript renderer, Electron IPC, `electron-store` for local settings, a menu bar/tray menu, and an Electron `webview` for AI websites.
 
+## Download
+
+Download the latest Windows installer from [GitHub Releases](https://github.com/StewardMelvinTang/AIOverlayTool/releases/latest). Run the `Float AI Setup` executable attached to the newest release.
+
+Windows builds are currently unsigned, so Microsoft Defender SmartScreen may show an unknown-publisher warning.
+
 ## Features
 
 - Popup window toggled by `Option+Space` on macOS and `F20` on Windows by default.
 - Integrated settings drawer inside the popup with Window, Providers, and Shortcut sections.
 - Provider manager for ChatGPT, Claude, Gemini, and custom bookmarks.
+- Smooth, horizontally scrollable provider navigation with draggable toolbar spacing.
+- Quick Ask window for sending a prompt to a selected provider without opening the full popup first.
+- Built-in ScratchPad and simplified download/upload SpeedTest add-ons.
 - Bundled provider PNG icons plus a picker that copies custom PNG icons into app data.
 - Popup sizing controlled from settings.
 - Optional chrome transparency, always-on-top, remember position, hide-on-blur, launch-at-startup, and tray/menu bar settings.
@@ -15,6 +24,7 @@ Float AI is a macOS and Windows Electron app that opens a floating, always-on-to
 - Mouse back and forward buttons navigate the active provider page.
 - macOS menu bar item (with Dock fallback when disabled) and Windows system tray menu with Open Popup, Open Settings, Refresh Pages, and Quit.
 - Provider sign-in popups open inside a secured companion window that shares the provider cookie/session store.
+- Automatic renderer recovery, rotating diagnostic logs, and resource snapshots for troubleshooting freezes or crashes.
 - Portable backup export/import for moving settings, providers, custom icons, add-ons, and ScratchPad notes between macOS and Windows.
 - AI pages load in Electron `webview`, not an iframe.
 
