@@ -130,6 +130,201 @@ button {
   background-clip: padding-box;
 }
 
+.provider-browser-shell {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  color: var(--color-text);
+  background: var(--bg-shell);
+  user-select: none;
+}
+
+.provider-browser-toolbar {
+  width: 100%;
+  height: 50px;
+  display: grid;
+  grid-template-columns: 34px 34px minmax(140px, 1fr) 38px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  background: var(--bg-toolbar);
+  border-bottom: 1px solid var(--border-toolbar);
+  -webkit-app-region: drag;
+}
+
+.provider-browser-action,
+.provider-browser-download {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  background: transparent;
+  border-radius: 50%;
+  cursor: default;
+  transition: color 0.14s ease, background 0.14s ease, opacity 0.14s ease;
+}
+
+.provider-browser-action:hover:not(:disabled),
+.provider-browser-download:hover:not(:disabled) {
+  color: var(--color-text-strong);
+  background: var(--bg-icon-btn-hover);
+}
+
+.provider-browser-action:disabled,
+.provider-browser-download:disabled {
+  opacity: 0.32;
+}
+
+.provider-browser-close:hover:not(:disabled) {
+  color: #ffffff;
+  background: #c63d46;
+}
+
+.provider-browser-address {
+  position: relative;
+  height: 36px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border-input);
+  border-radius: 18px;
+  background: var(--bg-input);
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.provider-browser-address:focus-within {
+  border-color: rgba(111, 184, 255, 0.5);
+}
+
+.provider-browser-address::after {
+  content: "";
+  position: absolute;
+  right: 38px;
+  bottom: 0;
+  left: 14px;
+  height: 2px;
+  border-radius: 2px;
+  background: #69b7ff;
+  opacity: 0;
+  transform: scaleX(0.2);
+  transform-origin: left;
+}
+
+.provider-browser-address.loading::after {
+  opacity: 0.9;
+  animation: provider-browser-load 1.1s ease-in-out infinite;
+}
+
+.provider-browser-address input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  padding: 0 42px 0 14px;
+  overflow: hidden;
+  color: var(--color-text);
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 12.5px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.provider-browser-copy {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  background: var(--bg-icon-btn);
+  border-radius: 50%;
+  cursor: default;
+  transition: color 0.14s ease, background 0.14s ease, opacity 0.14s ease;
+}
+
+.provider-browser-copy:hover:not(:disabled) {
+  color: var(--color-text-strong);
+  background: var(--bg-icon-btn-hover);
+}
+
+.provider-browser-copy:disabled {
+  opacity: 0.35;
+}
+
+.provider-browser-download {
+  width: 38px;
+  height: 38px;
+}
+
+.provider-browser-download-ring {
+  position: absolute;
+  inset: 2px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.provider-browser-download.active .provider-browser-download-ring {
+  background:
+    radial-gradient(circle, var(--bg-toolbar) 58%, transparent 60%),
+    conic-gradient(#69b7ff calc(var(--browser-download-progress) * 1%), rgba(105, 183, 255, 0.17) 0);
+}
+
+.provider-browser-download.indeterminate .provider-browser-download-ring {
+  border-top-color: #69b7ff;
+  border-right-color: rgba(105, 183, 255, 0.24);
+  background: transparent;
+  animation: provider-browser-download-spin 0.8s linear infinite;
+}
+
+.provider-browser-download.failed {
+  color: #ff7d86;
+}
+
+.provider-browser-download-percent {
+  position: absolute;
+  right: -2px;
+  bottom: -1px;
+  min-width: 16px;
+  padding: 1px 3px;
+  color: #06111a;
+  background: #8ac9ff;
+  border: 1px solid var(--bg-toolbar);
+  border-radius: 8px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 11px;
+  text-align: center;
+}
+
+@keyframes provider-browser-load {
+  0% {
+    transform: translateX(-35%) scaleX(0.22);
+  }
+  50% {
+    transform: translateX(35%) scaleX(0.55);
+  }
+  100% {
+    transform: translateX(95%) scaleX(0.18);
+  }
+}
+
+@keyframes provider-browser-download-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .popup-shell {
   position: relative;
   width: 100%;

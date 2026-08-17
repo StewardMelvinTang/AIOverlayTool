@@ -1,6 +1,6 @@
 {
   "name": "float-ai",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "description": "Float AI",
   "main": "dist-electron/main.js",
   "author": "Float AI",
@@ -10,6 +10,8 @@
     "build:main": "tsc -p tsconfig.electron.json",
     "build:renderer": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.electron.json && tsc --noEmit -p tsconfig.renderer.json",
+    "test:external-navigation": "electron scripts/smoke-external-navigation.js",
+    "test:provider-browser": "npm run build && electron scripts/smoke-provider-browser.js",
     "build": "npm run typecheck && npm run build:main && npm run build:renderer",
     "pack": "npm run build && electron-builder --dir",
     "pack:mac": "npm run build && electron-builder --mac --dir && find release -maxdepth 2 -name \"Float AI.app\" -exec codesign --deep --force --sign - {} \\;",

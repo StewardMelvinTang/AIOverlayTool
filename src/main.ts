@@ -68,6 +68,8 @@ import {
   logInfo,
   logWarn
 } from './main/diagnostics';
+import { classifyExternalNavigationUrl } from './main/externalNavigation';
+import { ProviderBrowserManager } from './main/providerBrowserManager';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === 'darwin';
@@ -114,6 +116,7 @@ let popupTopReassertTimers: NodeJS.Timeout[] = [];
 let popupMoveIdleTimer: NodeJS.Timeout | undefined;
 let isPopupMoving = false;
 let isPopupResizeInProgress = false;
+let isExternalOpenFailureDialogVisible = false;
 let popupInteractiveMoveSession: PopupInteractiveMoveSession | undefined;
 let lastMemoryPressureAt = 0;
 const webviewUnresponsiveTimers = new Map<number, NodeJS.Timeout>();
@@ -197,7 +200,9 @@ function getTrayIconPath(): string {
   return path.join(__dirname, '../icon_white.png');
 }
 
-function getRendererUrl(windowName: 'popup' | 'settings' | 'quickAsk'): string {
+type RendererWindowName = 'popup' | 'settings' | 'quickAsk' | 'browser';
+
+function getRendererUrl(windowName: RendererWindowName): string {
   if (isDev) {
     const baseUrl = process.env.VITE_DEV_SERVER_URL ?? 'http://127.0.0.1:5173';
     return `${baseUrl}?window=${windowName}`;
@@ -206,7 +211,7 @@ function getRendererUrl(windowName: 'popup' | 'settings' | 'quickAsk'): string {
   return path.join(__dirname, '../dist-renderer/index.html');
 }
 
-function loadRenderer(window: BrowserWindow, windowName: 'popup' | 'settings' | 'quickAsk'): void {
+function loadRenderer(window: BrowserWindow, windowName: RendererWindowName): void {
   let loadPromise: Promise<void>;
 
   if (isDev) {
@@ -225,82 +230,82 @@ function loadRenderer(window: BrowserWindow, windowName: 'popup' | 'settings' | 
 }
 
 function isAllowedProviderPopupUrl(url: string): boolean {
-  if (!url || url === 'about:blank') {
-    return true;
-  }
-
-  try {
-    const parsedUrl = new URL(url);
-    return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
-  } catch {
-    return false;
-  }
+  return url === 'about:blank' || classifyExternalNavigationUrl(url).kind === 'web';
 }
 
-function openExternalUrl(url: string): void {
-  if (!url || url === 'about:blank') {
+function openExternalUrl(url: string, source: string, allowWebUrls = false): void {
+  const target = classifyExternalNavigationUrl(url);
+  const isAllowed = target.kind === 'external-app' || (allowWebUrls && target.kind === 'web');
+
+  if (!isAllowed) {
+    logWarn('external-url-blocked', { source, protocol: target.protocol });
     return;
   }
 
-  try {
-    const parsedUrl = new URL(url);
-    if (parsedUrl.protocol !== 'mailto:' && parsedUrl.protocol !== 'tel:') {
-      return;
-    }
-  } catch {
+  logInfo('external-url-open-requested', { source, protocol: target.protocol });
+  void shell
+    .openExternal(url)
+    .then(() => {
+      logInfo('external-url-opened', { source, protocol: target.protocol });
+    })
+    .catch((error) => {
+      logError('external-url-open-failed', error, { source, protocol: target.protocol });
+      showExternalOpenFailure(target.protocol);
+    });
+}
+
+function showExternalOpenFailure(protocol: string | null): void {
+  if (isQuitting || isExternalOpenFailureDialogVisible) {
     return;
   }
 
-  void shell.openExternal(url).catch((error) => {
-    console.warn(`Could not open external URL "${url}".`, error);
-  });
+  isExternalOpenFailureDialogVisible = true;
+  void dialog
+    .showMessageBox({
+      type: 'warning',
+      title: appDisplayName,
+      message: 'Could not open the external app.',
+      detail: protocol
+        ? `Your computer could not find an app registered for ${protocol}. Open or reinstall that app, then try again.`
+        : 'The link did not contain a supported application protocol.',
+      buttons: ['OK'],
+      defaultId: 0,
+      noLink: true
+    })
+    .catch((error) => {
+      logError('external-url-failure-dialog-failed', error, { protocol });
+    })
+    .finally(() => {
+      isExternalOpenFailureDialogVisible = false;
+    });
 }
 
-function providerPopupWindowOptions(): Electron.BrowserWindowConstructorOptions {
-  return {
-    title: `${appDisplayName} - Sign In`,
-    width: 920,
-    height: 760,
-    minWidth: 480,
-    minHeight: 520,
-    parent: popupWindow ?? undefined,
-    autoHideMenuBar: true,
-    fullscreenable: false,
-    backgroundColor: '#ffffff',
-    webPreferences: {
-      partition: providerWebSessionPartition,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false
-    }
-  };
-}
-
-function configureProviderPopupWindow(window: BrowserWindow): void {
-  if (isMac) {
-    window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+function routeProviderExternalNavigation(event: Electron.Event, url: string, source: string): void {
+  if (isAllowedProviderPopupUrl(url)) {
+    return;
   }
 
-  window.webContents.setWindowOpenHandler(({ url }) => {
-    if (!isAllowedProviderPopupUrl(url)) {
-      openExternalUrl(url);
-      return { action: 'deny' };
-    }
-
-    return {
-      action: 'allow',
-      overrideBrowserWindowOptions: providerPopupWindowOptions()
-    };
-  });
-
-  window.webContents.on('will-navigate', (event, url) => {
-    if (!isAllowedProviderPopupUrl(url)) {
-      event.preventDefault();
-      openExternalUrl(url);
-    }
-  });
+  event.preventDefault();
+  openExternalUrl(url, source);
 }
+
+const providerBrowserManager = new ProviderBrowserManager({
+  appName: appDisplayName,
+  sessionPartition: providerWebSessionPartition,
+  toolbarHeight: 50,
+  getParentWindow: () => popupWindow,
+  getPreloadPath,
+  getIconPath: getAppIconPath,
+  loadToolbarRenderer: (window) => loadRenderer(window, 'browser'),
+  shouldCaptureContent: () => settings.privacy?.captureProtection ?? false,
+  shouldStayAlwaysOnTop: () => settings.popup.alwaysOnTop,
+  attachContentDiagnostics: attachProviderWebContentsDiagnostics,
+  openExternalUrl: (url, source) => openExternalUrl(url, source),
+  logInfo,
+  logWarn,
+  logError,
+  isMac
+});
 
 function getSelectedProvider(): Provider {
   return (
@@ -485,6 +490,10 @@ function createPopupWindow(): BrowserWindow {
   applyPopupTopMost({ moveToTop: true });
 
   popupWindow.on('blur', () => {
+    if (providerBrowserManager.hasOpenWindows()) {
+      return;
+    }
+
     if (!isShortcutCaptureActive && settings.popup.hideOnBlur) {
       hidePopup();
       return;
@@ -537,6 +546,8 @@ function createPopupWindow(): BrowserWindow {
   });
 
   popupWindow.on('closed', () => {
+    providerBrowserManager.closeAll('popup-window-closed');
+
     if (popupWindow !== createdPopupWindow) {
       return;
     }
@@ -622,9 +633,7 @@ function createPopupWindow(): BrowserWindow {
   });
 
   createdPopupWebContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url).catch((error) => {
-      logError('popup-open-external-failed', error);
-    });
+    openExternalUrl(url, 'popup-renderer-window-open', true);
     return { action: 'deny' };
   });
 
@@ -692,6 +701,7 @@ function recoverPopupRenderer(window: BrowserWindow, reason: string): void {
   clearPopupUnresponsiveTimer();
   isHiding = false;
   stopPopupTopGuard();
+  providerBrowserManager.closeAll('popup-renderer-recovery');
 
   logWarn('popup-renderer-recovery', { reason, wasVisible });
 
@@ -820,6 +830,7 @@ function hidePopup(): void {
   const window = popupWindow;
 
   if (!window || window.isDestroyed()) {
+    providerBrowserManager.closeAll('popup-unavailable');
     clearPopupHideTimer();
     isHiding = false;
     return;
@@ -845,6 +856,7 @@ function hidePopup(): void {
   }
 
   isHiding = true;
+  providerBrowserManager.closeAll('popup-hidden');
 
   popupHideTimer = setTimeout(() => {
     popupHideTimer = undefined;
@@ -1032,9 +1044,7 @@ function createQuickAskWindow(): BrowserWindow {
   });
 
   createdQuickAskWebContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url).catch((error) => {
-      logError('quick-ask-open-external-failed', error);
-    });
+    openExternalUrl(url, 'quick-ask-renderer-window-open', true);
     return { action: 'deny' };
   });
 
@@ -2541,7 +2551,9 @@ function registerIpc(): void {
         ? 'popup'
         : event.sender === quickAskContents
           ? 'quick-ask'
-          : 'unknown-renderer';
+          : providerBrowserManager.ownsToolbarContents(event.sender)
+            ? 'provider-browser'
+            : 'unknown-renderer';
 
     logWarn('renderer-error-report', {
       source,
@@ -2595,6 +2607,11 @@ function registerIpc(): void {
   ipcMain.handle('clipboard:writeText', (_event, text: string) => {
     clipboard.writeText(text);
   });
+  ipcMain.handle('providerBrowser:getState', (event) => providerBrowserManager.getStateForToolbar(event.sender));
+  ipcMain.handle('providerBrowser:back', (event) => providerBrowserManager.goBack(event.sender));
+  ipcMain.handle('providerBrowser:close', (event) => providerBrowserManager.close(event.sender));
+  ipcMain.handle('providerBrowser:copyUrl', (event) => providerBrowserManager.copyCurrentUrl(event.sender));
+  ipcMain.handle('providerBrowser:revealDownload', (event) => providerBrowserManager.revealDownload(event.sender));
   ipcMain.handle('backup:export', () => exportPortableBackup());
   ipcMain.handle('backup:import', () => importPortableBackup());
 }
@@ -2630,19 +2647,16 @@ app.on('web-contents-created', (_event, contents) => {
     });
 
     contents.setWindowOpenHandler(({ url }) => {
-      if (!isAllowedProviderPopupUrl(url)) {
-        openExternalUrl(url);
-        return { action: 'deny' };
-      }
-
-      return {
-        action: 'allow',
-        overrideBrowserWindowOptions: providerPopupWindowOptions()
-      };
+      setImmediate(() => providerBrowserManager.open(url, 'provider-webview-window-open'));
+      return { action: 'deny' };
     });
 
-    contents.on('did-create-window', (window) => {
-      configureProviderPopupWindow(window);
+    contents.on('will-frame-navigate', (event) => {
+      routeProviderExternalNavigation(event, event.url, 'provider-webview-frame-navigation');
+    });
+
+    contents.on('will-redirect', (event, url) => {
+      routeProviderExternalNavigation(event, url, 'provider-webview-redirect');
     });
 
     contents.on('before-input-event', (event, input) => {
@@ -2760,6 +2774,7 @@ function collectResourceSnapshot(reason: 'startup' | 'interval' | 'shutdown'): v
     logInfo('resource-snapshot', {
       reason,
       processCount: processes.length,
+      providerBrowserCount: providerBrowserManager.getOpenWindowCount(),
       totalPrivateMb: Math.round(totalPrivateBytesKb / 1024),
       totalWorkingSetMb: Math.round(totalWorkingSetKb / 1024),
       processes: processes.map((metric) => ({
@@ -2832,6 +2847,7 @@ app.on('before-quit', () => {
   }
 
   isQuitting = true;
+  providerBrowserManager.closeAll('app-before-quit');
   collectResourceSnapshot('shutdown');
   stopResourceMonitor();
   clearPopupHideTimer();

@@ -202,7 +202,8 @@ function normalizeError(error: unknown): Record<string, unknown> {
 
 function sanitizeString(value: string): string {
   return value
-    .replace(/https?:\/\/[^\s"'<>]+/gi, '<url>')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi, '<url>')
+    .replace(/\b(?:mailto|tel|sms):[^\s"'<>]+/gi, '<url>')
     .replace(/(bearer\s+)[a-z0-9._~+/=-]+/gi, '$1<redacted>')
     .replace(/([?&](?:access_token|auth|code|key|token)=)[^&\s]+/gi, '$1<redacted>')
     .slice(0, maximumStringLength);

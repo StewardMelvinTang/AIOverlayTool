@@ -3,6 +3,7 @@ import type {
   FloatAIBridge,
   MemoryPressureState,
   PopupPosition,
+  ProviderBrowserState,
   ProviderAudioState,
   ProviderIconPickResult,
   PopupSize,
@@ -46,6 +47,11 @@ const bridge: FloatAIBridge = {
   updateScratchPadNote: (noteId, patch) => ipcRenderer.invoke('scratchpad:updateNote', noteId, patch),
   deleteScratchPadNote: (noteId) => ipcRenderer.invoke('scratchpad:deleteNote', noteId),
   copyText: (text) => ipcRenderer.invoke('clipboard:writeText', text) as Promise<void>,
+  getProviderBrowserState: () => ipcRenderer.invoke('providerBrowser:getState') as Promise<ProviderBrowserState | null>,
+  providerBrowserBack: () => ipcRenderer.invoke('providerBrowser:back') as Promise<boolean>,
+  closeProviderBrowser: () => ipcRenderer.invoke('providerBrowser:close') as Promise<boolean>,
+  copyProviderBrowserUrl: () => ipcRenderer.invoke('providerBrowser:copyUrl') as Promise<boolean>,
+  revealProviderBrowserDownload: () => ipcRenderer.invoke('providerBrowser:revealDownload') as Promise<boolean>,
   exportPortableBackup: () => ipcRenderer.invoke('backup:export'),
   importPortableBackup: () => ipcRenderer.invoke('backup:import'),
   reportRendererError: (report: RendererErrorReport) => ipcRenderer.send('diagnostics:rendererError', report),
@@ -68,6 +74,11 @@ const bridge: FloatAIBridge = {
     const listener = (_event: Electron.IpcRendererEvent, state: MemoryPressureState) => callback(state);
     ipcRenderer.on('memory:pressure', listener);
     return () => ipcRenderer.removeListener('memory:pressure', listener);
+  },
+  onProviderBrowserStateChanged: (callback: (state: ProviderBrowserState) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, state: ProviderBrowserState) => callback(state);
+    ipcRenderer.on('providerBrowser:stateChanged', listener);
+    return () => ipcRenderer.removeListener('providerBrowser:stateChanged', listener);
   },
   onQuickAskSubmitted: (callback: (request: QuickAskRequest) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, request: QuickAskRequest) => callback(request);

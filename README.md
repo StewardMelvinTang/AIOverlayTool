@@ -23,7 +23,8 @@ Windows builds are currently unsigned, so Microsoft Defender SmartScreen may sho
 - Memory Saver unloads inactive AI pages and restores their last visited URL when reopened.
 - Mouse back and forward buttons navigate the active provider page.
 - macOS menu bar item (with Dock fallback when disabled) and Windows system tray menu with Open Popup, Open Settings, Refresh Pages, and Quit.
-- Provider sign-in popups open inside a secured companion window that shares the provider cookie/session store.
+- Provider links open in a secured companion browser with Back, address copy, native file dialogs, and visible download progress.
+- Hiding Float AI with its shortcut closes companion browsers, cancels their active downloads, and destroys their remote web contents.
 - Automatic renderer recovery, rotating diagnostic logs, and resource snapshots for troubleshooting freezes or crashes.
 - Portable backup export/import for moving settings, providers, custom icons, add-ons, and ScratchPad notes between macOS and Windows.
 - AI pages load in Electron `webview`, not an iframe.
@@ -34,6 +35,8 @@ Windows builds are currently unsigned, so Microsoft Defender SmartScreen may sho
 .
 ├─ src/
 │  ├─ main.ts                  # Electron main process
+│  ├─ main/
+│  │  └─ providerBrowserManager.ts # Companion browser, downloads, and lifecycle cleanup
 │  ├─ preload.ts               # Context bridge API
 │  ├─ shared/
 │  │  ├─ bridge.ts             # IPC bridge types
@@ -44,7 +47,8 @@ Windows builds are currently unsigned, so Microsoft Defender SmartScreen may sho
 │     ├─ styles.css
 │     ├─ global.d.ts
 │     └─ components/
-│        └─ PopupWindow.tsx
+│        ├─ PopupWindow.tsx
+│        └─ ProviderBrowserWindow.tsx
 ├─ provider-icons/            # Bundled provider PNG icons
 ├─ index.html
 ├─ package.json
@@ -91,9 +95,11 @@ npm run dist:win
 
 For local macOS testing, `npm run pack:mac` creates an unpacked app with an ad-hoc signature. Publicly distributed DMG/ZIP builds should be signed and notarized with Apple credentials.
 
-### Provider Login Windows
+### Provider Browser Windows
 
-Provider pages and popup login windows use the same persistent web session, so popup-based sign-in can return authenticated cookies to the embedded provider page. Remote login popups remain isolated from Node.js and from the app preload bridge.
+Provider links and popup login pages use the same persistent web session, so popup-based sign-in can return authenticated cookies to the embedded provider page. The companion browser keeps its toolbar in a local renderer and its remote page in a separate sandboxed `WebContentsView` with no Node.js or app preload access.
+
+Downloads use the operating system's Save dialog and report live progress in the toolbar. HTML file inputs continue to use Chromium's native Open dialog. Closing the main Float AI popup with its shortcut also closes all companion browsers and cancels any downloads still owned by them.
 
 Some identity providers intentionally refuse sign-in from embedded desktop browsers. In those cases the app cannot safely bypass that provider policy; use a provider-supported sign-in route where available.
 

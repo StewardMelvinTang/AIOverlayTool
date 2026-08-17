@@ -1,4 +1,5 @@
 import PopupWindow from './components/PopupWindow';
+import ProviderBrowserWindow from './components/ProviderBrowserWindow';
 import QuickAskWindow from './components/QuickAskWindow';
 
 export default function App() {
@@ -6,6 +7,10 @@ export default function App() {
 
   if (windowName === 'quickAsk') {
     return <QuickAskWindow />;
+  }
+
+  if (windowName === 'browser') {
+    return <ProviderBrowserWindow />;
   }
 
   return <PopupWindow />;

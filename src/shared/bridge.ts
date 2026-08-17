@@ -35,6 +35,37 @@ export type MemoryPressureState = {
   includeSelected: boolean;
 };
 
+export type ProviderBrowserNavigationState = {
+  url: string;
+  title: string;
+  canGoBack: boolean;
+  isLoading: boolean;
+};
+
+export type ProviderBrowserDownloadStatus =
+  | 'idle'
+  | 'starting'
+  | 'progressing'
+  | 'paused'
+  | 'completed'
+  | 'cancelled'
+  | 'interrupted';
+
+export type ProviderBrowserDownloadState = {
+  status: ProviderBrowserDownloadStatus;
+  filename: string;
+  receivedBytes: number;
+  totalBytes: number;
+  percent: number | null;
+  activeCount: number;
+  canReveal: boolean;
+};
+
+export type ProviderBrowserState = {
+  navigation: ProviderBrowserNavigationState;
+  download: ProviderBrowserDownloadState;
+};
+
 export type RendererErrorReport = {
   kind: 'window-error' | 'unhandled-rejection' | 'react-error';
   message: string;
@@ -81,6 +112,11 @@ export type FloatAIBridge = {
   updateScratchPadNote: (noteId: string, patch: ScratchPadNotePatch) => Promise<ScratchPadNote>;
   deleteScratchPadNote: (noteId: string) => Promise<ScratchPadNote[]>;
   copyText: (text: string) => Promise<void>;
+  getProviderBrowserState: () => Promise<ProviderBrowserState | null>;
+  providerBrowserBack: () => Promise<boolean>;
+  closeProviderBrowser: () => Promise<boolean>;
+  copyProviderBrowserUrl: () => Promise<boolean>;
+  revealProviderBrowserDownload: () => Promise<boolean>;
   exportPortableBackup: () => Promise<PortableBackupResult>;
   importPortableBackup: () => Promise<PortableBackupResult>;
   reportRendererError: (report: RendererErrorReport) => void;
@@ -88,6 +124,7 @@ export type FloatAIBridge = {
   onProviderChanged: (callback: (provider: Provider) => void) => () => void;
   onProviderAudioStateChanged: (callback: (state: ProviderAudioState) => void) => () => void;
   onMemoryPressure: (callback: (state: MemoryPressureState) => void) => () => void;
+  onProviderBrowserStateChanged: (callback: (state: ProviderBrowserState) => void) => () => void;
   onQuickAskSubmitted: (callback: (request: QuickAskRequest) => void) => () => void;
   onQuickAskAnimate: (callback: (state: 'in' | 'out') => void) => () => void;
   onOpenSettingsRequested: (callback: () => void) => () => void;
