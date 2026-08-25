@@ -94,6 +94,7 @@ export type FloatAIBridge = {
   submitQuickAsk: (payload: QuickAskSubmitPayload) => Promise<void>;
   setShortcutCaptureActive: (active: boolean) => Promise<void>;
   switchProvider: (providerId: string) => Promise<Provider>;
+  registerProviderWebContents: (providerId: string, webContentsId: number) => Promise<boolean>;
   pickProviderIcon: () => Promise<ProviderIconPickResult | null>;
   getProviderIconFromUrl: (url: string) => Promise<ProviderIconPickResult>;
   resolveProviderIcon: (icon: string) => Promise<string>;

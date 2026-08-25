@@ -160,6 +160,7 @@ export default function PopupWindow() {
   const quickAskAttemptCountRef = useRef<Record<string, number>>({});
   const quickAskRetryTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | undefined>>({});
   const [loadedProviderIds, setLoadedProviderIds] = useState<Set<string>>(() => new Set());
+  const [providerMountGenerations, setProviderMountGenerations] = useState<Record<string, number>>({});
   const providerStripRef = useRef<HTMLDivElement>(null);
   const providerScrollTargetRef = useRef(0);
   const providerScrollFrameRef = useRef<number | undefined>(undefined);
@@ -443,6 +444,14 @@ export default function PopupWindow() {
       if (!currentSettings || !provider) {
         return;
       }
+
+      // A selected webview remains rendered even after it is removed from the
+      // loaded-provider set. Change its key so a crashed or runaway renderer
+      // is always replaced with a fresh guest process.
+      setProviderMountGenerations((current) => ({
+        ...current,
+        [providerId]: (current[providerId] ?? 0) + 1
+      }));
 
       const shouldReload =
         provider.alwaysActive ||
@@ -1849,6 +1858,7 @@ export default function PopupWindow() {
     const syncProviderWebContents = () => {
       try {
         const webContentsId = element.getWebContentsId();
+        const registrationChanged = attachedWebContentsId !== webContentsId;
 
         if (attachedWebContentsId !== undefined && attachedWebContentsId !== webContentsId) {
           delete providerByWebContentsIdRef.current[attachedWebContentsId];
@@ -1857,6 +1867,10 @@ export default function PopupWindow() {
         attachedWebContentsId = webContentsId;
         providerByWebContentsIdRef.current[webContentsId] = providerId;
         setProviderAudible(providerId, element.isCurrentlyAudible());
+
+        if (registrationChanged) {
+          void window.floatAI.registerProviderWebContents(providerId, webContentsId).catch(() => false);
+        }
       } catch {
         // The guest may not be attached yet; did-attach will retry the mapping.
       }
@@ -2225,7 +2239,7 @@ export default function PopupWindow() {
 
             return (
               <webview
-                key={provider.id}
+                key={`${provider.id}:${providerMountGenerations[provider.id] ?? 0}`}
                 {...popupEnabledWebviewAttributes}
                 ref={(element) => setWebviewRef(provider.id, element as WebviewElement | null)}
                 className={provider.id === selectedProvider.id ? 'provider-webview active' : 'provider-webview'}

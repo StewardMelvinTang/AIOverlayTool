@@ -12,6 +12,7 @@ import {
   screen,
   shell,
   Tray,
+  webContents,
   type Rectangle,
   type WebContents
 } from 'electron';
@@ -70,12 +71,19 @@ import {
 } from './main/diagnostics';
 import { classifyExternalNavigationUrl } from './main/externalNavigation';
 import { ProviderBrowserManager } from './main/providerBrowserManager';
+import {
+  chooseProviderMemoryRecovery,
+  type ProviderProcessMemorySample
+} from './main/providerMemoryProtection';
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 const appDisplayName = 'Float AI';
 const appUserModelId = 'com.floatai.launcher';
+const providerMemoryRecoverySmokeUrl = !app.isPackaged
+  ? process.env.FLOAT_AI_TEST_PROVIDER_MEMORY_RECOVERY_URL
+  : undefined;
 const macDefaultHotkey = 'Option+Space';
 const quickAskDefaultHotkey = isMac ? 'Command+Shift+K' : 'Alt+Shift+K';
 const platformDefaultSettings = isMac
@@ -120,6 +128,9 @@ let isExternalOpenFailureDialogVisible = false;
 let popupInteractiveMoveSession: PopupInteractiveMoveSession | undefined;
 let lastMemoryPressureAt = 0;
 const webviewUnresponsiveTimers = new Map<number, NodeJS.Timeout>();
+const providerIdByWebContentsId = new Map<number, string>();
+const providerWebContentsIdByProviderId = new Map<string, number>();
+const lastProviderMemoryRecoveryAt = new Map<string, number>();
 const popupRecoveryAttempts: number[] = [];
 const quickAskRecoveryAttempts: number[] = [];
 
@@ -150,8 +161,9 @@ const quickAskHideAnimationMs = 150;
 const popupUnresponsiveRecoveryMs = 8000;
 const providerUnresponsiveRecoveryMs = 12000;
 const resourceMonitorIntervalMs = 2 * 60 * 1000;
-const highMemoryPrivateBytesKb = 1536 * 1024;
+const highMemoryPrivateBytesKb = 2 * 1024 * 1024;
 const memoryPressureCooldownMs = 10 * 60 * 1000;
+const providerMemoryRecoveryCooldownMs = 4 * 60 * 1000;
 const automaticRecoveryWindowMs = 60 * 1000;
 const maximumAutomaticRecoveries = 3;
 const quickAskWindowWidth = 740;
@@ -787,6 +799,68 @@ function runRendererRecoverySmokeTest(): void {
       initialContents.forcefullyCrashRenderer();
     }, 250);
   });
+}
+
+function runProviderMemoryRecoverySmokeTest(): void {
+  const providerId = 'memory-recovery-smoke';
+  let initialWebContentsId: number | undefined;
+  let forcedCrash = false;
+  let finished = false;
+
+  const finish = (passed: boolean, reason: string) => {
+    if (finished) {
+      return;
+    }
+
+    finished = true;
+    clearInterval(poll);
+    clearTimeout(deadline);
+    const details = { reason, initialWebContentsId };
+    if (passed) {
+      logInfo('provider-memory-recovery-smoke-test-passed', details);
+    } else {
+      logWarn('provider-memory-recovery-smoke-test-failed', details);
+    }
+    setTimeout(() => app.exit(passed ? 0 : 1), 100);
+  };
+
+  showPopup();
+
+  const poll = setInterval(() => {
+    const webContentsId = providerWebContentsIdByProviderId.get(providerId);
+    if (webContentsId === undefined) {
+      return;
+    }
+
+    const contents = webContents.fromId(webContentsId);
+    if (!contents || contents.isDestroyed()) {
+      return;
+    }
+
+    if (initialWebContentsId === undefined) {
+      if (contents.isLoading() || getWebContentsHostname(contents) !== '127.0.0.1') {
+        return;
+      }
+
+      initialWebContentsId = webContentsId;
+      logInfo('provider-memory-recovery-smoke-test-forcing-crash', {
+        providerId,
+        webContentsId,
+        processId: getWebContentsProcessId(contents)
+      });
+      forcedCrash = true;
+      contents.forcefullyCrashRenderer();
+      return;
+    }
+
+    if (forcedCrash && webContentsId !== initialWebContentsId) {
+      finish(true, 'provider-webview-recreated');
+    }
+  }, 100);
+  poll.unref();
+
+  const deadline = setTimeout(() => finish(false, 'recovery-timeout'), 20_000);
+  deadline.unref();
 }
 
 function reserveAutomaticRecovery(attempts: number[]): boolean {
@@ -2334,6 +2408,91 @@ function createTrayImage(): Electron.NativeImage {
   return resizedImage;
 }
 
+function getWebContentsHostname(contents: WebContents): string | null {
+  try {
+    const url = new URL(contents.getURL());
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.hostname : url.protocol;
+  } catch {
+    return null;
+  }
+}
+
+function getWebContentsProcessId(contents: WebContents): number | null {
+  try {
+    return contents.isDestroyed() ? null : contents.getOSProcessId();
+  } catch {
+    return null;
+  }
+}
+
+function registerProviderWebContents(
+  sender: WebContents,
+  providerId: string,
+  candidateWebContentsId: number
+): boolean {
+  const popupContents = getUsableWebContents(popupWindow);
+  const normalizedWebContentsId = Math.trunc(candidateWebContentsId);
+  const provider = settings.providers.find((candidate) => candidate.id === providerId);
+  const target = Number.isFinite(normalizedWebContentsId)
+    ? webContents.fromId(normalizedWebContentsId)
+    : undefined;
+
+  if (
+    !popupContents ||
+    sender !== popupContents ||
+    !provider ||
+    !target ||
+    target.isDestroyed() ||
+    target.getType() !== 'webview' ||
+    target.hostWebContents !== sender
+  ) {
+    logWarn('provider-webview-registration-rejected', {
+      providerId,
+      webContentsId: normalizedWebContentsId
+    });
+    return false;
+  }
+
+  const previousWebContentsId = providerWebContentsIdByProviderId.get(providerId);
+  if (previousWebContentsId !== undefined && previousWebContentsId !== normalizedWebContentsId) {
+    providerIdByWebContentsId.delete(previousWebContentsId);
+  }
+
+  const previousProviderId = providerIdByWebContentsId.get(normalizedWebContentsId);
+  if (previousProviderId && previousProviderId !== providerId) {
+    providerWebContentsIdByProviderId.delete(previousProviderId);
+  }
+
+  if (
+    previousWebContentsId === normalizedWebContentsId &&
+    previousProviderId === providerId
+  ) {
+    return true;
+  }
+
+  providerIdByWebContentsId.set(normalizedWebContentsId, providerId);
+  providerWebContentsIdByProviderId.set(providerId, normalizedWebContentsId);
+
+  logInfo('provider-webview-registered', {
+    providerId,
+    webContentsId: normalizedWebContentsId,
+    processId: getWebContentsProcessId(target),
+    hostname: getWebContentsHostname(target),
+    alwaysActive: provider.alwaysActive
+  });
+
+  target.once('destroyed', () => {
+    if (providerIdByWebContentsId.get(normalizedWebContentsId) === providerId) {
+      providerIdByWebContentsId.delete(normalizedWebContentsId);
+    }
+    if (providerWebContentsIdByProviderId.get(providerId) === normalizedWebContentsId) {
+      providerWebContentsIdByProviderId.delete(providerId);
+    }
+  });
+
+  return true;
+}
+
 function openDiagnosticsFolder(): void {
   const diagnosticsPath = getDiagnosticsDirectory();
   void shell.openPath(diagnosticsPath).then((errorMessage) => {
@@ -2572,6 +2731,9 @@ function registerIpc(): void {
   ipcMain.handle('quickAsk:submit', (_event, payload: QuickAskSubmitPayload) => submitQuickAsk(payload));
   ipcMain.handle('shortcut:captureActive', (_event, active: boolean) => setShortcutCaptureActive(Boolean(active)));
   ipcMain.handle('provider:switch', (_event, providerId: string) => switchProvider(providerId));
+  ipcMain.handle('provider:registerWebContents', (event, providerId: string, webContentsId: number) =>
+    registerProviderWebContents(event.sender, providerId, webContentsId)
+  );
   ipcMain.handle('provider:pickIcon', () => pickProviderIcon());
   ipcMain.handle('provider:getIconFromUrl', (_event, url: string) => getProviderIconFromUrl(url));
   ipcMain.handle('provider:resolveIcon', (_event, icon: string) => resolveProviderIcon(icon));
@@ -2755,6 +2917,84 @@ function stopResourceMonitor(): void {
   }
 }
 
+function recoverRunawayProviderProcess(
+  decision: NonNullable<ReturnType<typeof chooseProviderMemoryRecovery>>,
+  totalPrivateBytesKb: number
+): boolean {
+  const now = Date.now();
+  const mostRecentRecoveryAt = Math.max(
+    0,
+    ...decision.providerIds.map((providerId) => lastProviderMemoryRecoveryAt.get(providerId) ?? 0)
+  );
+
+  if (now - mostRecentRecoveryAt < providerMemoryRecoveryCooldownMs) {
+    logInfo('provider-memory-recovery-deferred', {
+      reason: decision.reason,
+      processId: decision.processId,
+      providerIds: decision.providerIds,
+      privateMb: Math.round(decision.privateBytesKb / 1024),
+      retryAfterSeconds: Math.ceil(
+        (providerMemoryRecoveryCooldownMs - (now - mostRecentRecoveryAt)) / 1000
+      )
+    });
+    return false;
+  }
+
+  const targets = decision.webContentsIds
+    .map((webContentsId) => webContents.fromId(webContentsId))
+    .filter((contents): contents is WebContents => Boolean(
+      contents &&
+      !contents.isDestroyed() &&
+      contents.getType() === 'webview' &&
+      getWebContentsProcessId(contents) === decision.processId
+    ));
+  const target = targets[0];
+
+  if (!target) {
+    logWarn('provider-memory-recovery-target-missing', {
+      reason: decision.reason,
+      processId: decision.processId,
+      providerIds: decision.providerIds,
+      webContentsIds: decision.webContentsIds,
+      privateMb: Math.round(decision.privateBytesKb / 1024),
+      totalPrivateMb: Math.round(totalPrivateBytesKb / 1024)
+    });
+    return false;
+  }
+
+  for (const providerId of decision.providerIds) {
+    lastProviderMemoryRecoveryAt.set(providerId, now);
+  }
+
+  logWarn('provider-memory-recovery-triggered', {
+    reason: decision.reason,
+    processId: decision.processId,
+    providerIds: decision.providerIds,
+    webContentsIds: decision.webContentsIds,
+    privateMb: Math.round(decision.privateBytesKb / 1024),
+    totalPrivateMb: Math.round(totalPrivateBytesKb / 1024),
+    selectedProviderId: currentProviderId,
+    popupVisible: Boolean(popupWindow && !popupWindow.isDestroyed() && popupWindow.isVisible())
+  });
+
+  setImmediate(() => {
+    if (target.isDestroyed() || getWebContentsProcessId(target) !== decision.processId) {
+      return;
+    }
+
+    try {
+      target.forcefullyCrashRenderer();
+    } catch (error) {
+      logError('provider-memory-recovery-failed', error, {
+        processId: decision.processId,
+        providerIds: decision.providerIds
+      });
+    }
+  });
+
+  return true;
+}
+
 function collectResourceSnapshot(reason: 'startup' | 'interval' | 'shutdown'): void {
   try {
     const processes = app
@@ -2770,6 +3010,47 @@ function collectResourceSnapshot(reason: 'startup' | 'interval' | 'shutdown'): v
       .sort((left, right) => right.privateBytesKb - left.privateBytesKb);
     const totalPrivateBytesKb = processes.reduce((total, metric) => total + metric.privateBytesKb, 0);
     const totalWorkingSetKb = processes.reduce((total, metric) => total + metric.workingSetKb, 0);
+    const processMetricsById = new Map(processes.map((metric) => [metric.pid, metric]));
+    const providerProcessSamples: ProviderProcessMemorySample[] = [];
+    const providerProcesses: Array<Record<string, unknown>> = [];
+
+    for (const [webContentsId, providerId] of providerIdByWebContentsId) {
+      const contents = webContents.fromId(webContentsId);
+      if (!contents || contents.isDestroyed()) {
+        providerIdByWebContentsId.delete(webContentsId);
+        if (providerWebContentsIdByProviderId.get(providerId) === webContentsId) {
+          providerWebContentsIdByProviderId.delete(providerId);
+        }
+        continue;
+      }
+
+      const processId = getWebContentsProcessId(contents);
+      if (processId === null) {
+        continue;
+      }
+      const metric = processMetricsById.get(processId);
+      if (!metric) {
+        continue;
+      }
+
+      providerProcessSamples.push({
+        providerId,
+        webContentsId,
+        processId,
+        privateBytesKb: metric.privateBytesKb
+      });
+      providerProcesses.push({
+        providerId,
+        webContentsId,
+        processId,
+        hostname: getWebContentsHostname(contents),
+        alwaysActive: settings.providers.find((provider) => provider.id === providerId)?.alwaysActive === true,
+        selected: providerId === currentProviderId,
+        audible: contents.isCurrentlyAudible(),
+        privateMb: Math.round(metric.privateBytesKb / 1024),
+        workingSetMb: Math.round(metric.workingSetKb / 1024)
+      });
+    }
 
     logInfo('resource-snapshot', {
       reason,
@@ -2783,10 +3064,20 @@ function collectResourceSnapshot(reason: 'startup' | 'interval' | 'shutdown'): v
         workingSetKb: undefined,
         privateMb: Math.round(metric.privateBytesKb / 1024),
         workingSetMb: Math.round(metric.workingSetKb / 1024)
-      }))
+      })),
+      providerProcesses
     });
 
+    const providerMemoryRecovery = chooseProviderMemoryRecovery(
+      providerProcessSamples,
+      totalPrivateBytesKb
+    );
+    const recoveryTriggered = providerMemoryRecovery
+      ? recoverRunawayProviderProcess(providerMemoryRecovery, totalPrivateBytesKb)
+      : false;
+
     if (
+      !recoveryTriggered &&
       totalPrivateBytesKb >= highMemoryPrivateBytesKb &&
       Date.now() - lastMemoryPressureAt >= memoryPressureCooldownMs
     ) {
@@ -2812,6 +3103,33 @@ app.whenReady().then(() => {
   app.userAgentFallback = app.userAgentFallback.replace(/Electron\/[\d.]+ /, '');
 
   settings = deepMergeSettings(platformDefaultSettings, store.store as DeepPartial<FloatAISettings>);
+  if (providerMemoryRecoverySmokeUrl) {
+    settings = {
+      ...settings,
+      defaultProviderId: 'memory-recovery-smoke',
+      globalHotkey: 'F19',
+      launchAtStartup: false,
+      showTrayIcon: false,
+      providers: [{
+        id: 'memory-recovery-smoke',
+        name: 'Memory recovery smoke',
+        url: providerMemoryRecoverySmokeUrl,
+        icon: 'chatgpt',
+        alwaysActive: true
+      }],
+      quickAsk: {
+        ...settings.quickAsk,
+        hotkey: 'F18',
+        providerId: 'memory-recovery-smoke'
+      },
+      performance: {
+        ...settings.performance,
+        memorySaver: true,
+        memorySaverUnloadMinutes: 1
+      }
+    };
+    currentProviderId = settings.defaultProviderId;
+  }
   store.set(settings);
   
   nativeTheme.themeSource = settings.darkMode ? 'dark' : 'light';
@@ -2829,7 +3147,9 @@ app.whenReady().then(() => {
     hardwareAccelerationEnabled: settings.performance.hardwareAcceleration
   });
 
-  if (!app.isPackaged && process.env.FLOAT_AI_TEST_RENDERER_RECOVERY === '1') {
+  if (providerMemoryRecoverySmokeUrl) {
+    runProviderMemoryRecoverySmokeTest();
+  } else if (!app.isPackaged && process.env.FLOAT_AI_TEST_RENDERER_RECOVERY === '1') {
     runRendererRecoverySmokeTest();
   }
 
@@ -2867,6 +3187,12 @@ app.on('before-quit', () => {
 
 function attachProviderWebContentsDiagnostics(contents: Electron.WebContents): void {
   const webContentsId = contents.id;
+  const getProviderDetails = () => ({
+    webContentsId,
+    providerId: providerIdByWebContentsId.get(webContentsId),
+    processId: getWebContentsProcessId(contents) ?? undefined,
+    hostname: contents.isDestroyed() ? undefined : getWebContentsHostname(contents)
+  });
 
   const clearUnresponsiveTimer = () => {
     const timer = webviewUnresponsiveTimers.get(webContentsId);
@@ -2881,7 +3207,7 @@ function attachProviderWebContentsDiagnostics(contents: Electron.WebContents): v
       return;
     }
 
-    logWarn('provider-webview-unresponsive', { webContentsId });
+    logWarn('provider-webview-unresponsive', getProviderDetails());
     clearUnresponsiveTimer();
 
     const timer = setTimeout(() => {
@@ -2891,7 +3217,7 @@ function attachProviderWebContentsDiagnostics(contents: Electron.WebContents): v
         return;
       }
 
-      logWarn('provider-webview-force-recovery', { webContentsId });
+      logWarn('provider-webview-force-recovery', getProviderDetails());
       contents.forcefullyCrashRenderer();
     }, providerUnresponsiveRecoveryMs);
 
@@ -2899,14 +3225,14 @@ function attachProviderWebContentsDiagnostics(contents: Electron.WebContents): v
   });
 
   contents.on('responsive', () => {
-    logInfo('provider-webview-responsive', { webContentsId });
+    logInfo('provider-webview-responsive', getProviderDetails());
     clearUnresponsiveTimer();
   });
 
   contents.on('render-process-gone', (_event, details) => {
     clearUnresponsiveTimer();
     logWarn('provider-webview-render-process-gone', {
-      webContentsId,
+      ...getProviderDetails(),
       reason: details.reason,
       exitCode: details.exitCode
     });
@@ -2914,13 +3240,20 @@ function attachProviderWebContentsDiagnostics(contents: Electron.WebContents): v
 
   contents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
     if (isMainFrame && errorCode !== -3) {
-      logWarn('provider-webview-load-failed', { webContentsId, errorCode, errorDescription });
+      logWarn('provider-webview-load-failed', {
+        ...getProviderDetails(),
+        errorCode,
+        errorDescription
+      });
     }
   });
 
   contents.once('destroyed', () => {
     clearUnresponsiveTimer();
-    logInfo('provider-webview-destroyed', { webContentsId });
+    logInfo('provider-webview-destroyed', {
+      webContentsId,
+      providerId: providerIdByWebContentsId.get(webContentsId)
+    });
   });
 }
 

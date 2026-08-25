@@ -26,6 +26,8 @@ const bridge: FloatAIBridge = {
   submitQuickAsk: (payload: QuickAskSubmitPayload) => ipcRenderer.invoke('quickAsk:submit', payload) as Promise<void>,
   setShortcutCaptureActive: (active: boolean) => ipcRenderer.invoke('shortcut:captureActive', active) as Promise<void>,
   switchProvider: (providerId: string) => ipcRenderer.invoke('provider:switch', providerId) as Promise<Provider>,
+  registerProviderWebContents: (providerId: string, webContentsId: number) =>
+    ipcRenderer.invoke('provider:registerWebContents', providerId, webContentsId) as Promise<boolean>,
   pickProviderIcon: () => ipcRenderer.invoke('provider:pickIcon'),
   getProviderIconFromUrl: (url: string) =>
     ipcRenderer.invoke('provider:getIconFromUrl', url) as Promise<ProviderIconPickResult>,

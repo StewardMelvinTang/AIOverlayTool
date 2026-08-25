@@ -21,6 +21,7 @@ Windows builds are currently unsigned, so Microsoft Defender SmartScreen may sho
 - Optional chrome transparency, always-on-top, remember position, hide-on-blur, launch-at-startup, and tray/menu bar settings.
 - Performance settings for Memory Saver and macOS hardware acceleration.
 - Memory Saver unloads inactive AI pages and restores their last visited URL when reopened.
+- Runaway provider renderers are identified by provider/process and automatically reset before they can exhaust system memory, including Always Active pages.
 - Mouse back and forward buttons navigate the active provider page.
 - macOS menu bar item (with Dock fallback when disabled) and Windows system tray menu with Open Popup, Open Settings, Refresh Pages, and Quit.
 - Provider links open in a secured companion browser with Back, address copy, native file dialogs, and visible download progress.
@@ -36,7 +37,8 @@ Windows builds are currently unsigned, so Microsoft Defender SmartScreen may sho
 ├─ src/
 │  ├─ main.ts                  # Electron main process
 │  ├─ main/
-│  │  └─ providerBrowserManager.ts # Companion browser, downloads, and lifecycle cleanup
+│  │  ├─ providerBrowserManager.ts # Companion browser, downloads, and lifecycle cleanup
+│  │  └─ providerMemoryProtection.ts # Per-provider memory policy and recovery selection
 │  ├─ preload.ts               # Context bridge API
 │  ├─ shared/
 │  │  ├─ bridge.ts             # IPC bridge types

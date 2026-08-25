@@ -1,6 +1,6 @@
 {
   "name": "float-ai",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Float AI",
   "main": "dist-electron/main.js",
   "author": "Float AI",
@@ -11,6 +11,8 @@
     "build:renderer": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.electron.json && tsc --noEmit -p tsconfig.renderer.json",
     "test:external-navigation": "electron scripts/smoke-external-navigation.js",
+    "test:memory-protection": "npm run build:main && node scripts/test-provider-memory-protection.js",
+    "test:provider-memory-recovery": "npm run build && node scripts/smoke-provider-memory-recovery.js",
     "test:provider-browser": "npm run build && electron scripts/smoke-provider-browser.js",
     "build": "npm run typecheck && npm run build:main && npm run build:renderer",
     "pack": "npm run build && electron-builder --dir",
